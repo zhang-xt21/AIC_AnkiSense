@@ -1,0 +1,100 @@
+/* Visual authoring workspace. Existing practice and export styles stay shared. */
+main[data-view="review"] { max-width: 1880px; padding-inline: 22px; }
+.card-workspace .page-heading { margin-bottom: 20px; gap: 16px; }
+.card-workspace .page-heading h1 { font-size: clamp(23px, 2.15vw, 32px); }
+.card-workspace .lead { font-size: 13px; max-width: 740px; }
+.workbench-toolbar { display: grid; grid-template-columns: minmax(145px, .85fr) minmax(130px, .6fr) minmax(220px, 1.7fr) auto; gap: 12px; align-items: end; margin-bottom: 18px; padding: 15px 17px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.workbench-toolbar .field { margin: 0; min-width: 0; }
+.workbench-toolbar .field > span { font-size: 12px; margin-bottom: 5px; }
+.workbench-toolbar select { font-size: 13px; text-overflow: ellipsis; }
+.workbench-pager { display: flex; align-items: center; gap: 7px; min-height: 46px; white-space: nowrap; }
+.workbench-pager .btn { padding-inline: 10px; font-size: 12px; }
+.workbench-grid { display: grid; grid-template-columns: minmax(225px, .95fr) minmax(335px, 1.38fr) minmax(255px, 1fr); align-items: start; gap: 16px; }
+.workbench-grid > .panel { min-width: 0; overflow: hidden; }
+.workbench-grid .panel-header { min-height: 72px; padding: 16px 18px; }
+.workbench-grid .panel-header h2 { font-size: 16px; }
+.workbench-grid .meta { font-size: 11px; }
+.workbench-grid > .panel > .panel-body { padding: 18px; height: max(420px, calc(100dvh - 340px)); max-height: 850px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #c9d5c7 transparent; }
+.workbench-grid .helper { font-size: 12px; }
+.workbench-grid input, .workbench-grid textarea, .workbench-grid select { font-size: 14px; }
+.workbench-grid textarea { min-height: 76px; line-height: 1.7; }
+.workbench-document-name { margin-bottom: 13px; font-size: 14px; font-weight: 600; }
+.workbench-source-nav { display: flex; align-items: center; gap: 6px; margin-bottom: 16px; }
+.workbench-source-nav select { min-width: 0; font-size: 12px; padding-inline: 7px; }
+.workbench-source-nav .btn { padding-inline: 9px; }
+.workbench-page-image { width: 100%; padding: 9px; margin-bottom: 14px; background: #f3f5f0; border: 1px solid var(--line); border-radius: 9px; cursor: zoom-in; }
+.workbench-page-image img { display: block; width: 100%; max-height: 290px; object-fit: contain; background: #fff; }
+.workbench-page-image .helper { display: block; margin-top: 7px; }
+.workbench-excerpts { display: grid; gap: 12px; margin-top: 14px; }
+.workbench-excerpts .source-block { padding: 13px; margin: 0; }
+.workbench-excerpts .cited-source { border-color: #afc8b1; background: #fafcf8; }
+.workbench-excerpts .source-text { font-size: 13px; line-height: 1.85; }
+.workbench-excerpts .quote { font-size: 12px; margin-bottom: 10px; }
+.workbench-excerpts .btn { font-size: 12px; }
+.workbench-source-links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+.workbench-form .field { margin-bottom: 17px; }
+.workbench-form .field > span:first-child { font-size: 13px; }
+.workbench-form .field-row { gap: 12px; }
+.workbench-form .card-image-editor { padding: 14px; margin-block: 18px 22px; }
+.workbench-form .card-image-item { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 10px; }
+.workbench-form .figure-recommendations { padding: 10px; }
+.workbench-form .figure-candidate { grid-template-columns: minmax(0, 1fr); }
+.workbench-form .figure-candidate-actions, .workbench-form .figure-recommend-header { flex-wrap: wrap; }
+.workbench-rubric, .workbench-evidence { border-top: 1px solid var(--line); padding-top: 20px; margin-top: 22px; }
+.workbench-rubric h3, .workbench-evidence h3 { margin-bottom: 7px; font-size: 15px; }
+.workbench-rubric-row { display: grid; grid-template-columns: 23px minmax(0, 1fr) auto; align-items: start; gap: 8px; margin-block: 10px; }
+.workbench-rubric-row .btn { padding-inline: 3px; font-size: 12px; }
+.rubric-number { margin-top: 12px; font-size: 12px; color: var(--teal); font-variant-numeric: tabular-nums; }
+.workbench-evidence-row { margin-bottom: 15px; }
+.workbench-evidence-row .source-top { gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+.workbench-evidence-row .btn { padding-inline: 4px; font-size: 12px; }
+.workbench-save-bar { position: sticky; bottom: -18px; margin: 20px -18px -18px; padding: 12px 18px 16px; border-top: 1px solid var(--line); background: #fffffffa; box-shadow: 0 -7px 18px #263c3207; z-index: 2; }
+.workbench-save-bar > .helper { margin: 0 0 7px; color: var(--teal); }
+.workbench-save-actions { margin: 0; gap: 7px; flex-wrap: wrap; }
+.workbench-save-actions .btn { padding-inline: 10px; font-size: 12px; flex: 1 1 auto; }
+.workbench-save-bar .inline-error:not(:empty) { padding-bottom: 8px; font-size: 12px; }
+.preview-face-tabs { display: flex; gap: 5px; padding: 4px; margin-bottom: 17px; background: #f0f3ed; border-radius: 9px; }
+.preview-face-tabs .btn { flex: 1; border: 0; background: transparent; color: var(--muted); }
+.preview-face-tabs [aria-pressed="true"] { color: var(--teal); background: white; box-shadow: 0 1px 6px #182f2710; }
+.preview-study-card { padding: 20px 17px; border: 1px solid #d9e3d5; border-radius: 12px; background: #fbfcf8; box-shadow: 0 6px 20px #263c3205; }
+.preview-card-brand { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--teal); font-weight: 600; margin-bottom: 25px; }
+.preview-eyebrow { font-size: 11px; color: var(--muted); margin-bottom: 9px; }
+.preview-question { font-size: 19px; line-height: 1.65; white-space: pre-wrap; margin-bottom: 18px; }
+.preview-answer { font-size: 14px; line-height: 1.85; white-space: pre-wrap; }
+.preview-answer-placeholder { border: 1px dashed #cdd9c7; padding: 14px 11px; margin-top: 26px; border-radius: 8px; color: #81927d; font-size: 12px; background: white; }
+.preview-source-label { font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px; margin: 22px 0 0; }
+.preview-study-card .card-image-figure { background: white; padding: 6px; }
+.preview-study-card .card-image-zoom { padding: 3px; border: 0; }
+.preview-study-card .card-image-caption { padding: 3px 5px; font-size: 11px; }
+.preview-image-count { text-align: center; margin-top: 15px; }
+.settings-navigation { margin-top: 22px; }
+.workbench-mobile-tabs { display: none; }
+@media (max-width: 1350px) and (min-width: 981px) {
+  .workbench-toolbar { grid-template-columns: minmax(0, 1fr) minmax(0, .85fr); }
+  .workbench-pager { justify-content: flex-end; }
+  .workbench-grid { grid-template-columns: minmax(240px, .85fr) minmax(330px, 1.3fr); }
+  .workbench-source { grid-row: span 2; }
+  .workbench-preview { grid-column: 2; }
+  .workbench-grid > .panel > .panel-body { height: auto; max-height: 650px; }
+}
+@media (max-width: 980px) {
+  main[data-view="review"] { padding-inline: 16px; }
+  .workbench-toolbar { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .workbench-pager { justify-content: flex-end; }
+  .workbench-grid { grid-template-columns: minmax(0, 1fr); }
+  .workbench-grid > .panel > .panel-body { height: auto; max-height: none; }
+  .workbench-mobile-tabs { display: flex; gap: 6px; margin-bottom: 15px; }
+  .workbench-mobile-tabs .btn { flex: 1; }
+  .workbench-mobile-tabs [aria-pressed="true"] { color: #fff; background: var(--teal); border-color: var(--teal); }
+  .workbench-grid[data-pane="editor"] > :not(.workbench-editor), .workbench-grid[data-pane="source"] > :not(.workbench-source), .workbench-grid[data-pane="preview"] > :not(.workbench-preview) { display: none; }
+  .settings-navigation { margin-top: 8px; }
+}
+@media (max-width: 540px) {
+  .workbench-toolbar { gap: 10px; padding: 12px; }
+  .workbench-toolbar > .field:nth-child(3), .workbench-pager { grid-column: 1 / -1; }
+  .workbench-pager { justify-content: space-between; }
+  .workbench-grid > .panel > .panel-body { padding: 15px; }
+  .workbench-save-bar { bottom: -15px; margin-inline: -15px; padding-inline: 15px; }
+  .workbench-form .field-row { grid-template-columns: minmax(0, 1fr); }
+  .card-workspace .page-heading { align-items: stretch; }
+}

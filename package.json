@@ -1,0 +1,19 @@
+{
+  "name": "ankisense",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline UI verification tools for AnkiSense",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node tools/test_node.cjs",
+    "test:browser": "npm run test:browser:feedback && npm run test:browser:workbench && npm run test:browser:settings",
+    "test:browser:feedback": "node tools/feedback_check.cjs",
+    "test:browser:workbench": "node tools/workbench_check.cjs",
+    "test:browser:settings": "node tools/model_settings_check.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

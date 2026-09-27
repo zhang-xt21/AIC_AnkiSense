@@ -1,0 +1,1 @@
+"""AnkiSense local learning companion."""
