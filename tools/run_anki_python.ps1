@@ -16,7 +16,7 @@ if ($ArgumentsJson -notmatch '^\s*\[' -or @($scriptArgs | Where-Object { $_ -isn
     throw 'ArgumentsJson must be a JSON array of strings.'
 }
 if (-not $DataDirectory) {
-    $DataDirectory = Join-Path $WorkDirectory ('测试记录\2026-09-27-Anki插件\runtime-' + [Guid]::NewGuid().ToString('N'))
+    $DataDirectory = Join-Path $WorkDirectory ('.local\acceptance\anki-runtime-' + [Guid]::NewGuid().ToString('N'))
 }
 $DataDirectory = [System.IO.Path]::GetFullPath($DataDirectory)
 foreach ($required in @('python313.dll', 'python313.zip', 'app_packages')) {

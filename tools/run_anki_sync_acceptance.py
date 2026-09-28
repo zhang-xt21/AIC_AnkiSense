@@ -23,7 +23,7 @@ from ankisense.plugin_api import PluginConnection
 
 
 def main():
-    run = ROOT / "测试记录" / "2026-09-27-Anki插件" / ("live-" + datetime.now().strftime("%H%M%S") + "-" + uuid4().hex[:6])
+    run = ROOT / ".local" / "acceptance" / ("anki-sync-" + datetime.now().strftime("%H%M%S") + "-" + uuid4().hex[:6])
     storage = run / "server-data"
     storage.mkdir(parents=True)
     with socket.socket() as sock:

@@ -46,9 +46,3 @@ origin/*.lnk
 *.pdf
 .DS_Store
 Thumbs.db
-
-# Keep reviewed written reports, not local run artifacts and model caches.
-测试记录/**
-!测试记录/**/
-!测试记录/**/*.md
-测试记录/**/classifier-models/
