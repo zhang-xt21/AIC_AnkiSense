@@ -1,8 +1,4 @@
 /* Visual authoring workspace. Existing practice and export styles stay shared. */
-main[data-view="review"] { max-width: 1880px; padding-inline: 22px; }
-.card-workspace .page-heading { margin-bottom: 20px; gap: 16px; }
-.card-workspace .page-heading h1 { font-size: clamp(23px, 2.15vw, 32px); }
-.card-workspace .lead { font-size: 13px; max-width: 740px; }
 .workbench-toolbar { display: grid; grid-template-columns: minmax(145px, .85fr) minmax(130px, .6fr) minmax(220px, 1.7fr) auto; gap: 12px; align-items: end; margin-bottom: 18px; padding: 15px 17px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
 .workbench-toolbar .field { margin: 0; min-width: 0; }
 .workbench-toolbar .field > span { font-size: 12px; margin-bottom: 5px; }
