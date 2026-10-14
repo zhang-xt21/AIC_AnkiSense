@@ -125,10 +125,19 @@ class AttemptService:
                     self._check_replay(attempt, card_id, answer, expected_version,
                                        origin, client_id)
                     return []
-                card = self._record("cards", card_id)
-                if expected_version is not None and card["version"] != expected_version:
-                    raise HTTPException(409, "题目版本已更新，请同步后重新作答。")
-                blocks = self._current_sources(card)
+                try:
+                    card = self._record("cards", card_id)
+                    if expected_version is not None and card["version"] != expected_version:
+                        raise HTTPException(409, "题目版本已更新，请同步后重新作答。")
+                    blocks = self._current_sources(card)
+                except HTTPException as error:
+                    if origin != "anki" or error.status_code not in {404, 409, 422}:
+                        raise
+                    # All checks above run before writing an attempt. A
+                    # rejected Anki submission is safe to keep as a draft;
+                    # ambiguous transport errors must still reuse the ID.
+                    raise HTTPException(409, {"code": "card_changed",
+                                              "message": "卡片或原文已变化，请同步并核对后重新作答。"}) from None
                 attempt = {
                     "id": str(uuid4()), "request_id": request_id,
                     "card_id": card_id, "answer": answer, "status": "pending",

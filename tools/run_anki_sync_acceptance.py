@@ -1,4 +1,5 @@
 """Start an isolated demo server and test the plugin against real Anki APIs."""
+import argparse
 from datetime import datetime
 import io
 import json
@@ -22,7 +23,7 @@ from ankisense.media import normalize_image, save_media
 from ankisense.plugin_api import PluginConnection
 
 
-def main():
+def main(anki_root=None):
     run = ROOT / ".local" / "acceptance" / ("anki-sync-" + datetime.now().strftime("%H%M%S") + "-" + uuid4().hex[:6])
     storage = run / "server-data"
     storage.mkdir(parents=True)
@@ -72,6 +73,8 @@ def main():
                        "-Script", str(ROOT / "tools/verify_anki_sync.py"), "-WorkDirectory", str(ROOT),
                        "-DataDirectory", str(run / "anki-profile"), "-ArgumentsJson", json.dumps([str(connection.path)]),
                        "-AllowLoopback"]
+            if anki_root:
+                command.extend(["-AnkiRoot", str(anki_root)])
             result = subprocess.run(command, cwd=ROOT, stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
             (run / "anki-runtime.log").write_bytes(result.stdout + result.stderr)
             print(result.stdout.decode("utf-8", errors="replace"))
@@ -87,4 +90,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--anki-root", type=Path, help="Optional path to an installed official Anki runtime")
+    main(parser.parse_args().anki_root)

@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .db import Store
-from .apkg import build_apkg, export_snapshot
+from .apkg import build_apkg, export_snapshot, require_exportable
 from .attempts import AttemptService
 from .plugin_api import PluginAPI, install_plugin_error_handlers
 from .figure_recommendations import RecommendationService
@@ -114,7 +114,8 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "mode": app.state.settings.mode}
+        return {"application": "AnkiSense", "api_version": 1,
+                "status": "ok", "mode": app.state.settings.mode}
 
     @app.get("/api/state")
     def state():
@@ -337,9 +338,11 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
         return await app.state.attempts.retry(identifier)
 
     def export_records(request, reader=None):
-        for card in (reader or store).all("cards"):
+        source = reader or store
+        for card in source.all("cards"):
             if card["status"] != "approved":
                 continue
+            require_exportable(card, source)
             document = get_record("documents", card["document_id"], reader)
             blocks = source_models(card, reader)
             pages = ", ".join(str(page) for page in sorted({block.page for block in blocks})) if document["id"].startswith("pdf-") else ""
@@ -347,17 +350,19 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
 
     @app.get("/api/export")
     def export(request: Request):
-        stream = io.StringIO(newline="")
-        # Anki import directives; data has no header note and HTML is disabled.
-        stream.write(f"#separator:Tab\n#html:false\n#columns:{EXPORT_COLUMNS}\n")
-        writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
-        for _, values in export_records(request):
-            writer.writerow(values)
+        with export_snapshot(store) as snapshot:
+            stream = io.StringIO(newline="")
+            # Anki import directives; data has no header note and HTML is disabled.
+            stream.write(f"#separator:Tab\n#html:false\n#columns:{EXPORT_COLUMNS}\n")
+            writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
+            for _, values in export_records(request, snapshot):
+                writer.writerow(values)
         return Response(stream.getvalue().encode("utf-8"), media_type="text/tab-separated-values; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="ankisense-approved.tsv"'})
 
     @app.get("/api/export/media")
     def export_with_media(request: Request):
-        content = media_zip(export_records(request), store, storage)
+        with export_snapshot(store) as snapshot:
+            content = media_zip(export_records(request, snapshot), snapshot, storage)
         return Response(content, media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="ankisense-approved-media.zip"'})
 
     @app.get("/api/export/apkg")

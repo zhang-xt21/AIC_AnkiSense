@@ -36,11 +36,13 @@ def load_adapter():
 def test_real_anki_collection_sync(tmp_path):
     import pytest
     runner = ROOT / "tools" / "run_anki_python.ps1"
-    if not (ROOT / "origin" / "Anki" / "python313.dll").is_file():
+    runtime = Path(os.environ.get("ANKISENSE_ANKI_RUNTIME", ROOT / "origin" / "Anki"))
+    if not (runtime / "python313.dll").is_file():
         pytest.skip("The optional installed official Anki runtime is not available")
     shell = shutil.which("pwsh") or shutil.which("powershell")
     assert shell, "A PowerShell host is needed for the official embedded runtime"
     result = subprocess.run([shell, "-NoProfile", "-File", str(runner), "-Script", str(Path(__file__).resolve()),
+                             "-AnkiRoot", str(runtime),
                              "-DataDirectory", str(tmp_path / "official-anki")],
                             cwd=ROOT, capture_output=True, timeout=120,
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

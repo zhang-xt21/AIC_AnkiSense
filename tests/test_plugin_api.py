@@ -137,6 +137,25 @@ def test_manifest_detail_and_media_are_consistent_and_guarded(make_client):
     assert client.get(PREFIX + f"/media/{media['id']}", params={"sha256": asset["sha256"]}, headers=headers).status_code == 404
 
 
+@pytest.mark.parametrize("change", ["version", "unapproved", "outdated"])
+def test_changed_card_is_a_definite_unaccepted_submission(make_client, change):
+    client, headers, ai = make_client()
+    card = approved(client)
+    if change == "version":
+        body = {key: card[key] for key in CardUpdate.model_fields if key in card}
+        changed = client.put(f"/api/cards/{card['id']}", json={**body, "question": card["question"] + " 请解释。"})
+        assert changed.status_code == 200, changed.text
+    else:
+        client.app.state.store.put("cards", {**card, **({"status": "draft"} if change == "unapproved"
+                                                  else {"source_outdated": True})})
+
+    response = client.post(PREFIX + "/attempts", json=payload(card), headers=headers)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "card_changed"
+    assert client.app.state.store.all("attempts") == []
+    assert ai.calls == 0
+
+
 def test_plugin_practice_is_idempotent_versioned_and_profile_scoped(make_client):
     client, headers, ai = make_client()
     card = approved(client)
