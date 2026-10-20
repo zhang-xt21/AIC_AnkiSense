@@ -351,7 +351,6 @@ function render() {
     nav.classList.toggle("active", active);
     if (active) nav.setAttribute("aria-current", "page"); else nav.removeAttribute("aria-current");
   }
-  $("#breadcrumb-current").textContent = viewNames[app.view];
   $("#mode-status").textContent = app.data.mode === "demo" ? "演示模式 · 本地规则反馈" : app.data.configured ? `云端模式 · ${app.data.model || "已配置模型"}` : "云端模式 · 待配置 API Key";
   const main = $("#main");
   const manualOpen = main.querySelector("#manual-tools")?.open;
@@ -377,7 +376,7 @@ function renderModelSettings() {
 }
 
 function renderMaterials() {
-  const page = el("div", {}, heading("01 / 学习材料", "导入讲义，卡牌自动生成", "选择文件后，系统自动处理，完成后直接显示卡牌。", [demoButton(), button("查看卡片  →", () => setView("cards"))]));
+  const page = el("div", {}, heading("学习材料", "从一份讲义，开始理解", "把课程中的关键知识，整理成有依据、可练习的学习卡片。", [demoButton(), button("查看卡片  →", () => setView("cards"))]));
   page.append(renderAutomaticImport());
   if (app.data.documents.length) page.append(el("div", { class: "workspace-summary", "aria-label": "学习空间概览" }, ...[
     [app.data.documents.length, "份学习材料"],
@@ -640,7 +639,7 @@ function renderSourcePanel() {
 function renderReview() {
   const all = app.data.cards;
   const approved = all.filter(c => c.status === "approved").length;
-  const page = el("div", { class: "card-workspace" }, heading("02 / 制卡工作台", "把讲义，做成看得懂的卡片", "左边核对讲义，中间编辑内容，右边预览正反面。保存并批准后，就可以开始学习。", [button("导入讲义", () => setView("materials"), "btn secondary"), button("前往练习  →", () => setView("practice"), "btn", !approved)]));
+  const page = el("div", { class: "card-workspace" }, heading("制卡工作台", "把讲义，做成看得懂的卡片", "左边核对讲义，中间编辑内容，右边预览正反面。保存并批准后，就可以开始学习。", [button("导入讲义", () => setView("materials"), "btn secondary"), button("前往练习  →", () => setView("practice"), "btn", !approved)]));
   if (!all.length) { page.append(panel("等待第一张卡片", "先从材料开始", empty("从一小节讲义开始制卡", "在学习材料中选取原文生成草稿，或先用演示卡片体验编辑与配图。", demoButton()))); return page; }
   const course = el("select", { "aria-label": "筛选课程" }, el("option", { value: "all" }, "全部课程"), ...app.data.documents.map(doc => el("option", { value: doc.id, selected: doc.id === app.reviewDocument }, doc.title)));
   course.addEventListener("change", () => { app.reviewDocument = course.value; render(); });
@@ -892,7 +891,7 @@ function renderPractice() {
   const progress = PracticeProgress.getProgress(approved, app.data.attempts);
   const filtered = PracticeProgress.filterCards(approved, progress, app.practiceFilter);
   const completedCount = approved.filter(card => progress.get(card.id)?.completed).length;
-  const page = el("div", {}, heading("03 / 主动回忆", "把记住的，变成理解的", "先用自己的话回答，再对照反馈和讲义，补上遗漏的知识点。"));
+  const page = el("div", {}, heading("开始练习", "把记住的，变成理解的", "先用自己的话回答，再对照反馈和讲义，补上遗漏的知识点。"));
   page.append(renderPracticeOverview(approved, progress));
   if (!approved.length && !app.attempt) {
     page.append(panel("练习空间", null, empty("先批准一张你信任的卡片", "到卡片审核页对照原文核对答案。原文更新后，相关卡片也需要重新审核。", button("去审核卡片  →", () => setView("review")), "◎")));
@@ -1112,7 +1111,7 @@ function renderExport() {
   const approved = cards.filter(card => card.status === "approved");
   const imageCards = approved.filter(card => CardImages.refs(card).length);
   const hasImages = imageCards.length > 0;
-  const page = el("div", {}, heading("04 / 长期复习", "把理解，留给未来的自己", "将已批准的卡片导入 Anki，安排后续复习。来源与本机练习链接会一并保留。"));
+  const page = el("div", {}, heading("导出至 Anki", "把理解，留给未来的自己", "将已批准的卡片导入 Anki，安排后续复习。来源与本机练习链接会一并保留。"));
   page.append(el("div", { class: "stats" }, ...[[approved.length, "可导出的已批准卡片"], [cards.filter(c => c.status === "draft").length, "仍待人工审核"], [approved.filter(c => c.kind === "remediation").length, "其中的补充练习"]].map(([n, desc]) => el("div", { class: "stat" }, text("div", String(n).padStart(2, "0"), "stat-number"), text("p", desc)))));
   const errorNode = el("p", { class: "inline-error", role: "alert" });
   const downloadButton = (label, path, filename, primary = false) => {

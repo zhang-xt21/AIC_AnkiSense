@@ -29,7 +29,7 @@ const STYLE = `
   width: 0 !important;
   height: 0 !important;
 }
-.ankisense-electron .topbar { -webkit-app-region: drag; justify-content: flex-start; position: sticky; top: 0; z-index: 1000; background: #fdfdfa; box-shadow: 0 1px 2px rgba(38, 50, 31, 0.06); }
+.ankisense-electron .topbar { -webkit-app-region: drag; justify-content: flex-start; position: sticky; top: 0; z-index: 1000; background: #ffffff; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06); }
 .ankisense-electron .mode-badge { margin-left: auto; }
 .ankisense-electron .window-controls {
   -webkit-app-region: no-drag;
@@ -49,10 +49,10 @@ const STYLE = `
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: #5a6a5a;
+  color: #5b6b84;
   cursor: pointer;
 }
-.window-controls .wc-btn:hover { background: rgba(0, 0, 0, 0.06); color: #26321f; }
+.window-controls .wc-btn:hover { background: rgba(0, 0, 0, 0.06); color: #1f2a37; }
 .window-controls .wc-close:hover { background: #d64541; color: #fff; }
 .window-controls .wc-btn svg { width: 15px; height: 15px; }
 .window-controls .wc-restore { display: none; }

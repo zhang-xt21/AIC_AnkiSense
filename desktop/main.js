@@ -8,7 +8,7 @@
 // ../ankisense/static and ../ankisense/*.py; any change there shows up here
 // on the next reload.
 
-const { app, BrowserWindow, dialog, ipcMain, Menu, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } = require("electron");
 const { spawn } = require("child_process");
 const http = require("http");
 const path = require("path");
@@ -161,6 +161,8 @@ app.whenReady().then(async () => {
     app.quit();
     return;
   }
+
+  await session.defaultSession.clearCache();
 
   createWindow();
 
