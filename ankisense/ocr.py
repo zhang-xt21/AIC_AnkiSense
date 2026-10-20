@@ -85,7 +85,7 @@ def render_page_png(content: bytes, page: int) -> bytes:
                 document.close()
 
 
-def _get_engine():
+def _get_engine(model_root=None):
     """Called under _OCR_LOCK; failed initialization may be retried later."""
     global _ENGINE, _ENGINE_INFO
     if _ENGINE is not None:
@@ -96,7 +96,7 @@ def _get_engine():
         import onnxruntime  # noqa: F401: fail with an actionable message early
     except ImportError as error:
         raise LocalOCRError("本地 OCR 依赖未安装，请安装项目 requirements.txt 中的依赖后重试。") from error
-    model_root = Path(__file__).resolve().parents[1] / "data" / "ocr-models"
+    model_root = Path(model_root) if model_root is not None else Path(__file__).resolve().parents[1] / "data" / "ocr-models"
     try:
         model_root.mkdir(parents=True, exist_ok=True)
         bundled = Path(rapidocr.__file__).resolve().parent / "models"
@@ -146,6 +146,74 @@ def _get_engine():
     return _ENGINE, _ENGINE_INFO
 
 
+def _optional_item(values, index):
+    try:
+        return values[index]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _raw_score(value):
+    # Preserve a finite engine score, not a calibrated correctness probability.
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _normalized_box(box, width, height):
+    if box is None or not width or not height:
+        return None
+    try:
+        if hasattr(box, "tolist"):
+            box = box.tolist()
+        if len(box) == 4 and all(isinstance(point, (int, float)) for point in box):
+            left, top, right, bottom = map(float, box)
+        else:
+            points = [(float(point[0]), float(point[1])) for point in box]
+            if len(points) < 4:
+                return None
+            left, right = min(x for x, _ in points), max(x for x, _ in points)
+            top, bottom = min(y for _, y in points), max(y for _, y in points)
+        if not all(math.isfinite(value) for value in (left, top, right, bottom)):
+            return None
+        result = [max(0.0, min(1.0, left / width)), max(0.0, min(1.0, top / height)),
+                  max(0.0, min(1.0, right / width)), max(0.0, min(1.0, bottom / height))]
+        return result if result[0] < result[2] and result[1] < result[3] else None
+    except (IndexError, ValueError, TypeError, OverflowError):
+        return None
+
+
+def _recognize_image(image_bytes: bytes) -> dict:
+    """Collect line geometry while keeping the engine's exact text and order."""
+    from PIL import Image
+
+    with Image.open(BytesIO(image_bytes)) as original:
+        width, height = original.size
+    with _OCR_LOCK:
+        engine, info = _get_engine()
+        recognition = engine(image_bytes)
+        recognized = getattr(recognition, "txts", None)
+        texts = [] if recognized is None else [str(line) for line in recognized]
+        boxes = getattr(recognition, "boxes", None)
+        scores = getattr(recognition, "scores", None)
+        lines, offset = [], 0
+        for index, text in enumerate(texts):
+            lines.append({"text": text,
+                          "bbox": _normalized_box(_optional_item(boxes, index), width, height),
+                          "score": _raw_score(_optional_item(scores, index)),
+                          "start": offset, "end": offset + len(text)})
+            offset += len(text) + 1  # Newlines join lines without rewriting them.
+        text = "\n".join(texts)
+        return {**info, "text": text, "raw_text": text, "ocr_lines": lines,
+                "image_width": width, "image_height": height,
+                "page_image_sha256": hashlib.sha256(image_bytes).hexdigest(),
+                "status": "pending" if text.strip() else "empty"}
+
+
 def recognize_page(content: bytes, page: int) -> dict:
     """Return recognition text or an explicit empty/failed page result.
 
@@ -153,7 +221,8 @@ def recognize_page(content: bytes, page: int) -> dict:
     original recognition remains available during human proofreading.
     """
     result = {
-        "page": page, "text": "", "raw_text": "", "method": "ocr",
+        "page": page, "text": "", "raw_text": "", "ocr_lines": [], "method": "ocr",
+        "image_width": None, "image_height": None, "page_image_sha256": None,
         "engine": "RapidOCR / ONNX Runtime CPU · PP-OCRv6 small",
         "engine_version": f"RapidOCR {package_version('rapidocr')}; ONNX Runtime {package_version('onnxruntime')}",
         "pipeline_version": PIPELINE_VERSION,
@@ -161,19 +230,45 @@ def recognize_page(content: bytes, page: int) -> dict:
     }
     try:
         image_bytes = render_page_png(content, page)
-        with _OCR_LOCK:
-            engine, info = _get_engine()
-            result.update(info)
-            recognition = engine(image_bytes)
-            lines = getattr(recognition, "txts", None)
-            if lines is None:
-                text = ""
-            else:
-                text = "\n".join(str(line) for line in lines)
-            result.update(text=text, raw_text=text, status="pending" if text.strip() else "empty")
-            return result
+        result.update(_recognize_image(image_bytes))
+        return result
     except LocalOCRError as error:
         result["error"] = str(error)
     except Exception:
         result["error"] = "该页本地 OCR 识别失败，请查看原图后重试，或手动输入校订文字。"
+    return result
+
+
+def recognize_region(content: bytes, page: int, bbox: list[float]) -> dict:
+    """Re-read an original-page crop as a suggestion; never save or approve it."""
+    from PIL import Image
+
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        raise LocalOCRError("局部识别范围须为原页内的有效矩形。")
+    values = [_raw_score(value) for value in bbox]
+    if (any(value is None or not 0 <= value <= 1 for value in values)
+            or values[0] >= values[2] or values[1] >= values[3]):
+        raise LocalOCRError("局部识别范围须为原页内的有效矩形。")
+    image_bytes = render_page_png(content, page)
+    with Image.open(BytesIO(image_bytes)) as original:
+        width, height = original.size
+        pixels = (math.floor(values[0] * width), math.floor(values[1] * height),
+                  math.ceil(values[2] * width), math.ceil(values[3] * height))
+        effective = [pixels[0] / width, pixels[1] / height,
+                     pixels[2] / width, pixels[3] / height]
+        with original.crop(pixels) as crop:
+            output = BytesIO()
+            crop.save(output, format="PNG")
+    result = _recognize_image(output.getvalue())
+    for line in result["ocr_lines"]:
+        if line["bbox"]:
+            left, top, right, bottom = line["bbox"]
+            line["bbox"] = [effective[0] + left * (effective[2] - effective[0]),
+                            effective[1] + top * (effective[3] - effective[1]),
+                            effective[0] + right * (effective[2] - effective[0]),
+                            effective[1] + bottom * (effective[3] - effective[1])]
+    result.update(page=page, method="ocr", suggestion_only=True, region_bbox=effective,
+                  image_width=width, image_height=height,
+                  region_image_sha256=result["page_image_sha256"],
+                  page_image_sha256=hashlib.sha256(image_bytes).hexdigest())
     return result

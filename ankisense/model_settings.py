@@ -125,7 +125,8 @@ def model_request(request):
     path = request.url.path
     return (path == "/api/card-drafts" or path in {"/api/attempts", "/api/plugin/v1/attempts"}
             or (path.startswith(("/api/attempts/", "/api/plugin/v1/attempts/")) and path.endswith("/retry"))
-            or (path.startswith("/api/cards/") and path.endswith("/image-recommendations/check")))
+            or (path.startswith("/api/cards/") and path.endswith(("/image-recommendations/check", "/auto-quality-check")))
+            or (path.startswith("/api/documents/") and path.endswith("/calibration")))
 
 
 def install_model_settings(app, configuration):
@@ -152,6 +153,8 @@ def install_model_settings(app, configuration):
             # These validation messages contain fixed text, never submitted values.
             raise HTTPException(422, str(error)) from None
         if (app.state.active_model_requests or app.state.image_checks.running
+                or any(item.get("status") in {"pending", "running"} for item in app.state.store.all("auto_card_jobs"))
+                or any(item.get("status") in {"pending", "running"} for item in app.state.store.all("material_imports"))
                 or any(item.get("status") == "pending" for item in app.state.store.all("attempts"))):
             raise HTTPException(409, "已有生成或分析在进行，请等待完成后再保存模型设置。")
         # No await between checking requests, persisting, and replacing settings:

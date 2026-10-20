@@ -1,0 +1,142 @@
+"use strict";
+
+function initializeAutomaticWorkspace() {
+  Object.assign(app, { materialImports: [], materialImportId: null, importBusy: false, importError: "", importTimer: null, automaticAnswers: new Set() });
+  viewNames.cards = "卡牌结果";
+}
+
+function activeMaterialImport(record) { return ["pending", "running"].includes(record.status); }
+function selectedMaterialImport() { return app.materialImports.find(r => r.id === app.materialImportId) || app.materialImports.find(r => r.document_id === app.documentId); }
+
+async function loadMaterialImports(initial = false) {
+  try {
+    const before = JSON.stringify(app.materialImports);
+    const result = await api("/api/material-imports");
+    app.materialImports = result.imports || [];
+    app.importError = "";
+    const active = app.materialImports.find(activeMaterialImport);
+    const requested = new URLSearchParams(location.search).get("import");
+    if (initial && requested && app.materialImports.some(r => r.id === requested)) {
+      app.materialImportId = requested;
+      app.view = "cards";
+    }
+    if (initial && !requested && active && !new URLSearchParams(location.search).has("card") && !new URLSearchParams(location.search).has("card_id")) {
+      app.materialImportId = active.id;
+      app.view = "cards";
+    }
+    const selected = selectedMaterialImport();
+    if (selected?.document_id) app.documentId = selected.document_id;
+    if (before !== JSON.stringify(app.materialImports)) {
+      if (app.view === "cards") await refresh();
+      else if (app.view === "materials") {
+        const current = document.querySelector("#automatic-import-status");
+        if (current) current.replaceWith(renderAutomaticImportStatus());
+      }
+    }
+    clearTimeout(app.importTimer);
+    if (active) app.importTimer = setTimeout(() => loadMaterialImports(), 1800);
+  } catch (error) {
+    if (app.materialImportId) {
+      app.importError = "连接暂时中断，后台任务会继续。正在重新连接…";
+      const current = document.querySelector("#automatic-import-status");
+      if (current) current.replaceWith(renderAutomaticImportStatus());
+      clearTimeout(app.importTimer);
+      app.importTimer = setTimeout(() => loadMaterialImports(), 4000);
+    }
+  }
+}
+
+function renderAutomaticImportStatus() {
+  const box = el("div", { id: "automatic-import-status", "aria-live": "polite" });
+  if (app.importError) box.append(note(app.importError, "warning"));
+  for (const record of app.materialImports.slice(0, 6)) {
+    const job = record.job;
+    const progress = job?.progress || record.progress;
+    const row = el("article", { class: "automatic-import-row", "data-import-status": record.status },
+      el("div", {}, text("strong", record.filename), text("p", record.message || "正在准备…", "meta")),
+      badge(activeMaterialImport(record) ? "自动处理中" : record.status === "completed" ? "已完成" : "处理详情", activeMaterialImport(record) ? "blue" : "green"));
+    if (progress?.total) row.append(el("progress", { max: progress.total, value: progress.completed, "aria-label": `${record.filename}处理进度` }));
+    if (job?.card_ids?.length) row.append(text("span", `${job.card_ids.length} 张卡牌已生成`, "meta"));
+    if (record.error || job?.error) row.append(note(record.error || job.error, "warning"));
+    row.append(button("查看卡牌", () => {
+      app.materialImportId = record.id;
+      history.replaceState(null, "", `?import=${encodeURIComponent(record.id)}`);
+      if (record.document_id) app.documentId = record.document_id;
+      setView("cards");
+    }, "btn secondary small"));
+    box.append(row);
+  }
+  return box;
+}
+
+function renderAutomaticImport() {
+  const file = el("input", { type: "file", accept: ".ppt,.pptx,.pdf", "aria-label": "选择讲义，自动制卡", disabled: app.importBusy });
+  file.addEventListener("change", async () => {
+    if (!file.files[0] || app.importBusy) return;
+    app.importBusy = true;
+    app.importError = "";
+    file.disabled = true;
+    try {
+      const data = new FormData();
+      data.append("file", file.files[0]);
+      const record = await api("/api/material-imports", { method: "POST", body: data });
+      app.materialImportId = record.id;
+      history.replaceState(null, "", `?import=${encodeURIComponent(record.id)}`);
+      app.materialImports = [record, ...app.materialImports.filter(r => r.id !== record.id)];
+      if (record.document_id) app.documentId = record.document_id;
+      app.view = "cards";
+      await refresh();
+      await loadMaterialImports();
+    } catch (error) {
+      app.importError = error.message;
+      render();
+    } finally { app.importBusy = false; file.disabled = false; if (app.importError && app.view === "materials") render(); }
+  });
+  return panel("导入讲义，自动得到卡牌", "选好文件即可，系统会自动完成识别、制卡、检查和原页配图。",
+    el("div", { class: "automatic-import" }, el("div", { class: "dropzone" }, text("div", "↥", "upload-symbol"),
+      text("strong", app.importBusy ? "正在上传讲义…" : "选择 PPT / PPTX / PDF 讲义"),
+      text("p", "支持整份讲义，最多 500 页、50 MB。导入后无需逐页确认或再次点击生成。"), file),
+      !modeIsCloud() || !app.data.configured ? note("请先在模型设置中保存可用的 API 配置。", "warning") : null,
+      renderAutomaticImportStatus()));
+}
+
+function renderCards() {
+  const record = selectedMaterialImport();
+  const documentId = record ? record.document_id : app.documentId;
+  const cards = app.data.cards.filter(c => c.document_id === documentId && c.status !== "rejected" && !c.source_outdated);
+  const page = el("div", {}, heading("卡牌结果", documentFor(documentId)?.title || record?.filename || "你的学习卡牌",
+    activeMaterialImport(record || {}) ? "系统正在自动处理，生成的卡牌会陆续出现在这里。" : `已生成 ${cards.length} 张卡牌。可以直接阅读、练习或导出。`,
+    [button("导入其他讲义", () => setView("materials"), "btn secondary"),
+      button("开始练习", () => { app.practiceId = cards.find(c => c.status === "approved")?.id || null; setView("practice"); }, "btn", !cards.some(c => c.status === "approved")),
+      button("导出至 Anki", () => setView("export"), "btn secondary", !cards.some(c => c.status === "approved"))]));
+  page.append(renderAutomaticImportStatus());
+  if (app.data.documents.length) {
+    const selector = el("select", { "aria-label": "查看哪份讲义的卡牌" }, ...app.data.documents.map(d => el("option", { value: d.id, selected: d.id === documentId }, d.title)));
+    selector.addEventListener("change", () => { app.documentId = selector.value; app.materialImportId = null; history.replaceState(null, "", location.pathname); render(); });
+    page.append(field("学习材料", selector));
+  }
+  const gallery = el("div", { class: "automatic-card-grid" });
+  for (const [index, card] of cards.entries()) {
+    const answer = el("details", { class: "automatic-card-answer", ...(app.automaticAnswers.has(card.id) ? { open: "" } : {}) }, el("summary", {}, "显示答案"), text("p", card.answer, "card-answer-text"));
+    answer.addEventListener("toggle", () => { if (answer.open) app.automaticAnswers.add(card.id); else app.automaticAnswers.delete(card.id); });
+    for (const image of card.images || []) {
+      const media = app.data.media.find(m => m.id === image.media_id);
+      if (media && image.side !== "question") answer.append(el("figure", {}, el("img", { src: media.url, alt: image.caption || "讲义原页", loading: "lazy" }), text("figcaption", image.caption || "讲义原页", "meta")));
+    }
+    const issues = card.auto_quality?.issues || [];
+    gallery.append(el("article", { class: "automatic-card", "data-card-id": card.id },
+      el("div", { class: "automatic-card-top" }, text("span", `卡牌 ${index + 1} · ${card.concept}`, "meta"),
+        badge(card.approval_method === "automatic" && card.status === "approved" ? "已自动检查" : card.status === "approved" ? "已就绪" : "有疑点", card.status === "approved" ? "green" : "amber")),
+      text("h2", card.question), answer,
+      issues.length ? note(issues.map(i => i.reason).join("；"), "warning") : null,
+      el("details", { class: "automatic-card-source" }, el("summary", {}, "查看来源"), ...card.evidence.map(e => text("blockquote", e.quote))),
+      button("编辑卡牌", () => { app.cardId = card.id; app.reviewFilter = documentId; setView("review"); }, "btn quiet small")));
+  }
+  page.append(gallery);
+  if (!cards.length) page.append(empty(activeMaterialImport(record || {}) ? "正在自动制卡…" : "这里会显示生成的卡牌",
+    activeMaterialImport(record || {}) ? "无需操作，页面会自动更新。整份讲义需要一些时间。" : "导入讲义后，系统会自动处理并显示结果。", activeMaterialImport(record || {}) ? null : button("导入讲义", () => setView("materials"))));
+  const issues = record?.job?.issues || [];
+  if (issues.length) page.append(el("details", { class: "automatic-processing-notes" }, el("summary", {}, `处理说明（${issues.length}）`),
+    ...issues.map(i => text("p", `${i.pages?.length ? `第 ${i.pages.join("、")} 页：` : ""}${i.reason}`))));
+  return page;
+}

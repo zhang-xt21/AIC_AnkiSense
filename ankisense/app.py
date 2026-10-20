@@ -16,6 +16,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .db import Store
 from .apkg import build_apkg, export_snapshot
 from .attempts import AttemptService
+from .auto_cards import AutoCardService
+from .automatic_import import AutomaticImportService
+from .source_calibration import SourceCalibrationService
 from .plugin_api import PluginAPI, install_plugin_error_handlers
 from .figure_recommendations import RecommendationService
 from .figure_vision import FigureVisionService
@@ -28,7 +31,8 @@ from .llm import AIError, AIService, Settings
 from .model_settings import ModelSettingsFile, install_model_settings, model_request
 from .paths import resolve_data_dir
 from .schemas import AttemptRequest, CardDraft, CardUpdate, GenerateRequest, SourceBlock, TextDocumentRequest, SourceCorrectionRequest, SourceRevisionRequest, SourcePageImageRequest
-from .sources import page_id, page_records, require_current_reviewed, save_page_revision
+from .sources import page_id, page_records, require_current_reviewed, save_page_revision, confirm_machine_page
+from .source_policy import machine_verified
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "ankisense" / "static"
@@ -57,9 +61,13 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
                 attempt.update(status="failed", error="上次分析被服务重启中断；答案已保存，可以重试。")
                 store.put("attempts", attempt)
         recommendations.recover()
+        auto_cards.recover()
+        automatic_imports.recover()
         try:
             yield
         finally:
+            await automatic_imports.shutdown()
+            await auto_cards.shutdown()
             await application.state.attempts.shutdown()
             await image_checks.shutdown()
             await recommendations.shutdown()
@@ -73,7 +81,17 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
     app.state.recommendations = recommendations
     app.state.image_checks = image_checks
     app.state.active_model_requests = 0
+    calibration = SourceCalibrationService(store, storage, lambda: app.state.ai, lambda: app.state.settings)
+    app.state.source_calibration = calibration
+    auto_cards = AutoCardService(store, storage, lambda: app.state.ai, lambda: app.state.settings,
+                                 recommendations, image_checks, calibration)
+    app.state.auto_cards = auto_cards
+    automatic_imports = AutomaticImportService(store, storage, auto_cards)
+    app.state.automatic_imports = automatic_imports
     install_model_settings(app, configuration)
+    app.include_router(auto_cards.router)
+    app.include_router(automatic_imports.router)
+    app.include_router(calibration.router)
     app.include_router(recommendations.router)
     app.include_router(image_checks.router)
     app.include_router(app.state.plugin.router)
@@ -180,7 +198,7 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
         path = storage / "uploads" / f"{document['id']}.pdf"
         if not path.is_file():
             raise HTTPException(404, "原始 PDF 文件不存在，请重新导入材料。")
-        return FileResponse(path, filename=document["filename"], media_type="application/pdf")
+        return FileResponse(path, filename=Path(document["filename"]).with_suffix(".pdf").name, media_type="application/pdf")
 
     def page_file(identifier, page):
         get_record("source_pages", page_id(identifier, page))
@@ -238,13 +256,16 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
     @app.get("/api/documents/{identifier}/pages/{page}/revisions")
     def page_history(identifier: str, page: int):
         get_record("source_pages", page_id(identifier, page))
-        return {"revisions": [item for item in store.all("source_revisions") if item["document_id"] == identifier and item["page"] == page]}
+        return {"revisions": [item for item in store.all("source_revisions") if item["document_id"] == identifier and item["page"] == page],
+                "confirmations": [item for item in store.all("source_confirmations") if item["document_id"] == identifier and item["page"] == page]}
 
     @app.put("/api/documents/{identifier}/pages/{page}")
     def correct_page(identifier: str, page: int, body: SourceCorrectionRequest):
         get_record("documents", identifier)
         old = get_record("source_pages", page_id(identifier, page))
         text = body.text.strip()
+        if old["revision"] == body.revision and old["text"] == text and machine_verified(old):
+            return confirm_machine_page(store, identifier, page, body.revision, text)
         if old["revision"] == body.revision and old["text"] == text and old.get("reviewed_at") and old["status"] in {"reviewed", "empty"}:
             return old
         return save_page_revision(store, identifier, page, body.revision,
@@ -265,6 +286,9 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
         result.setdefault("error", None)
         result.setdefault("models", [])
         result.setdefault("pipeline_version", None)
+        # A failed/legacy engine response must not inherit previous geometry.
+        for key, default in (("ocr_lines", []), ("image_width", None), ("image_height", None), ("page_image_sha256", None)):
+            result.setdefault(key, default)
         return save_page_revision(store, identifier, page, body.revision, result, "ocr")
 
     @app.post("/api/card-drafts")
@@ -295,6 +319,13 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
             raise HTTPException(409, "卡片版本已更新，请刷新后重新核对；当前草稿未覆盖已保存的内容。")
         changes = body.model_dump(exclude_none=True, exclude={"expected_version"})
         candidate = {**old, **changes, "version": old["version"] + 1, "updated_at": now()}
+        if old.get("auto_quality"):
+            content_changed = any(candidate.get(name) != old.get(name) for name in (*CardDraft.model_fields, "images"))
+            candidate["auto_quality"] = {**old["auto_quality"], "card_version": candidate["version"],
+                                         **({"verdict": "stale"} if content_changed else {})}
+            if content_changed and old.get("image_result"):
+                candidate["image_result"] = {**old["image_result"], "status": "stale",
+                                             "message": "文字、引用或配图已修改，旧配图检查已过期；请在配图区域重新核对。"}
         try:
             blocks = source_models(candidate)
             if any(block.document_id != old["document_id"] for block in blocks):
