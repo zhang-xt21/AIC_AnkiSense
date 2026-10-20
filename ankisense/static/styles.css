@@ -2640,6 +2640,31 @@ main {
 }
 
 /* Honor system motion preferences for existing and future hooks. */
+.auto-card-console { padding: 18px; margin-bottom: 20px; border: 1px solid #c9dbcd; border-radius: var(--radius); background: #f6faf5; }
+.auto-card-console h3, .auto-card-quality h3 { margin: 0; font-size: 16px; }
+.auto-card-options { display: grid; grid-template-columns: minmax(90px, .6fr) minmax(0, 1.4fr); gap: 12px; margin-top: 16px; }
+.auto-card-options .field { margin-bottom: 6px; }
+.auto-job-state { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 16px; }
+.auto-job-heading, .auto-issue-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.auto-job-state progress { width: 100%; margin-top: 12px; accent-color: var(--teal); }
+.auto-card-console .two-buttons { flex-wrap: wrap; }
+.auto-job-issues summary, .auto-job-history summary { cursor: pointer; padding: 14px 0 4px; font-size: 13px; }
+.auto-issues { list-style: none; margin: 12px 0 0; padding: 0; }
+.auto-issues li { margin: 10px 0; padding: 12px; border-left: 3px solid #b68b42; background: #fffaf0; overflow-wrap: anywhere; }
+.auto-issues .auto-issue-heading strong { font-size: 13px; font-weight: 500; }
+.auto-issues p { margin: 8px 0 0; }
+.auto-issue-evidence { white-space: pre-wrap; font-size: 12px; line-height: 1.6; }
+.auto-history-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding-top: 8px; }
+.auto-card-quality { margin-bottom: 20px; padding: 15px; border: 1px solid #e4d1aa; border-radius: 9px; background: #fffaf0; }
+.auto-card-quality.clear { border-color: #c9dbcd; background: #f6faf5; }
+.auto-card-quality .helper { margin: 10px 0 0; }
+@media (max-width: 650px) {
+  .auto-card-console { padding: 13px; }
+  .auto-card-options { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .auto-card-console > .btn { width: 100%; }
+}
+
+/* Honor system motion preferences for existing and future hooks. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation: none !important;
@@ -2654,3 +2679,28 @@ main {
     border-top-color: transparent;
   }
 }
+.source-calibration { margin-top: 18px; padding: 14px; min-width: 0; overflow-wrap: anywhere; border: 1px solid var(--line, #dde5dd); border-radius: 12px; }
+.source-calibration h3 { margin: 0 0 8px; }
+.source-calibration .two-buttons { flex-wrap: wrap; }
+.source-calibration-changes { display: grid; gap: 8px; margin: 12px 0; overflow-wrap: anywhere; }
+.source-calibration-changes del { background: #fff0ec; }
+.source-calibration-changes ins { background: #ecf6ee; text-decoration: none; }
+/* Automatic import and readable card results. */
+.automatic-import-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 16px 0; border-bottom: 1px solid var(--line, #dde5df); }
+.automatic-import-row > div { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
+.automatic-import-row p { margin: 5px 0 0; }
+.automatic-import-row progress { flex: 1 1 160px; max-width: 260px; accent-color: #366b50; }
+.automatic-card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; margin: 24px 0; }
+.automatic-card { background: #fffef9; border: 1px solid #dce4dc; border-radius: 16px; padding: 24px; min-width: 0; box-shadow: 0 4px 18px #1d392706; }
+.automatic-card-top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.automatic-card h2 { font-size: 20px; line-height: 1.6; margin: 20px 0; overflow-wrap: anywhere; }
+.automatic-card-answer { border-top: 1px solid #e5e9e2; padding: 16px 0; }
+.automatic-card summary, .manual-tools > summary, .automatic-processing-notes > summary { cursor: pointer; color: #365e45; font-weight: 600; }
+.automatic-card p, .automatic-card blockquote { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
+.automatic-card figure { margin: 14px 0; }
+.automatic-card img { max-width: 100%; height: auto; border-radius: 6px; }
+.automatic-card-source { margin: 12px 0; font-size: 14px; }
+.manual-tools { margin-top: 30px; padding: 20px 0; border-top: 1px solid #dde5df; }
+.manual-tools > summary { margin-bottom: 22px; }
+.automatic-processing-notes { margin: 24px 0; }
+@media (max-width: 900px) { .automatic-card-grid { grid-template-columns: 1fr; } .automatic-card { padding: 20px; } }

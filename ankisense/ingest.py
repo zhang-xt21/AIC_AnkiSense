@@ -1,9 +1,20 @@
 import hashlib
+import re
 from io import BytesIO
 
 from pypdf import PdfReader
 
 from .ocr import package_version, recognize_page, render_page_png
+
+
+def automatic_page_skip(text):
+    compact = re.sub(r"\s+", "", text)
+    headings = [re.sub(r"\s+", "", line).strip("•-–") for line in text.splitlines()[:3]]
+    if any(line.casefold() in {"目录", "内容提要", "课程安排", "本章内容", "本讲内容", "教学目标", "主要教学目标", "本章教学目标", "本章主要教学目标", "学习目标", "agenda", "outline", "contents"} for line in headings) or re.search(r"分以下.{0,8}(?:部分|章节)介绍", compact[:180]):
+        return "目录或课程安排已自动跳过。"
+    if re.fullmatch(r"[\w.\-]+\.(?:mp4|avi|mov|wmv)", compact, re.IGNORECASE):
+        return "视频文件名没有独立知识内容，已自动跳过。"
+    return None
 
 
 def text_blocks(document_id: str, pages: list[tuple[int, str]]) -> list[dict]:
@@ -63,7 +74,8 @@ def _has_usable_text(text: str) -> bool:
 
 
 def parse_pdf_document(content: bytes, start: int = 1, end: int | None = None,
-                       mode: str = "auto") -> dict:
+                       mode: str = "auto", *, max_pages: int = 30,
+                       max_characters: int = 100000, progress=None) -> dict:
     """Extract each selected physical page and retain proofreading metadata.
 
     Unlike the legacy parse_pdf helper, per-page OCR failures are retained in
@@ -81,8 +93,8 @@ def parse_pdf_document(content: bytes, start: int = 1, end: int | None = None,
         end = total if end is None else end
         if not 1 <= start <= end <= total:
             raise ValueError(f"页码范围无效；该 PDF 共 {total} 页。")
-        if end - start + 1 > 30:
-            raise ValueError("每次最多解析 30 页，请选择本章节的页码范围。")
+        if end - start + 1 > max_pages:
+            raise ValueError(f"每次最多解析 {max_pages} 页，请拆分讲义后导入。")
     except ValueError:
         raise
     except Exception as error:
@@ -119,8 +131,10 @@ def parse_pdf_document(content: bytes, start: int = 1, end: int | None = None,
         if len(page["text"]) > 50000:
             raise ValueError(f"第 {number} 页文字超过 5 万字，请拆分材料或检查 PDF 文字层后重试。")
         pages.append(page)
-        if sum(len(item["text"]) for item in pages) > 100000:
+        if sum(len(item["text"]) for item in pages) > max_characters:
             raise ValueError("所选内容过长，请缩小页码范围。")
+        if progress:
+            progress(number - start + 1, end - start + 1)
 
     # Separate proofreading imports from legacy documents and from forced OCR.
     digest = hashlib.sha256(content + f":{start}:{end}:proof-v1:{mode}".encode()).hexdigest()[:24]

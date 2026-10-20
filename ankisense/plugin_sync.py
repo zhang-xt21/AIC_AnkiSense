@@ -17,6 +17,7 @@ from .evidence import validate_card
 from .media import MAX_UPLOAD_BYTES, normalize_image, require_media
 from .schemas import CardUpdate, SourceBlock
 from .sources import page_id, require_current_reviewed
+from .source_policy import source_usable
 
 
 PROTOCOL_VERSION = 1
@@ -72,7 +73,7 @@ class PluginSync:
             validate_card(draft, blocks)
             if card.get("source_outdated"):
                 raise HTTPException(409, "卡片引用的原文已更新，请重新审核后同步。")
-            require_current_reviewed(reader, blocks)
+            require_current_reviewed(reader, blocks, card)
             return document, blocks
         except (ValueError, KeyError, TypeError) as error:
             raise HTTPException(409, "卡片内容或引用无效，请重新审核后同步。") from error
@@ -87,7 +88,7 @@ class PluginSync:
             source = record.get("source") or {}
             if source:
                 current = reader.get("source_pages", page_id(document_id, source.get("page")))
-                if (not current or current.get("status") != "reviewed"
+                if (not current or (not source_usable(current) and source.get("origin") != "automatic_source_page")
                         or current.get("revision") != source.get("revision")):
                     raise HTTPException(409, "配图所用的原文页已更新或未校对，请重新审核配图。")
             with path.open("rb") as handle:
