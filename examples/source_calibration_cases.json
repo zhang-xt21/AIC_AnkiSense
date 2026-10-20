@@ -1,0 +1,15 @@
+{
+  "description": "自编的校准政策测试数据。visual_reads 是预设测试替身，不是真实模型结果，不用于宣称模型准确率。",
+  "cases": [
+    {"id":"unchanged","before":"栈遵循后进先出，最后入栈的元素最先出栈。","first":"栈遵循后进先出，最后入栈的元素最先出栈。","second":"栈遵循后进先出，最后入栈的元素最先出栈。","expected_auto":true},
+    {"id":"glyph_with_local_support","before":"栈遵循后进先山，最后入栈的元素最先出栈。","first":"栈遵循后进先出，最后入栈的元素最先出栈。","second":"栈遵循后进先出，最后入栈的元素最先出栈。","local":"栈遵循后进先出，最后入栈的元素最先出栈。","expected_auto":true},
+    {"id":"number_change","before":"队列容量是30个元素，入队前应确认队列未满。","first":"队列容量是80个元素，入队前应确认队列未满。","second":"队列容量是80个元素，入队前应确认队列未满。","expected_auto":false},
+    {"id":"negation_change","before":"空栈可以直接执行出栈操作，这会导致下溢。","first":"空栈不可以直接执行出栈操作，这会导致下溢。","second":"空栈不可以直接执行出栈操作，这会导致下溢。","expected_auto":false},
+    {"id":"formula","before":"环形队列的下一位置为 i = (i + 1) % n。","first":"环形队列的下一位置为 i = (i + 1) % n。","second":"环形队列的下一位置为 i = (i + 1) % n。","expected_auto":false},
+    {"id":"visual_disagreement","before":"栈遵循后进先山，最后入栈的元素最先出栈。","first":"栈遵循后进先出，最后入栈的元素最先出栈。","second":"栈遵循后进先山，最后入栈的元素最先出栈。","expected_auto":false},
+    {"id":"local_disagreement","before":"栈遵循后进先山，最后入栈的元素最先出栈。","first":"栈遵循后进先出，最后入栈的元素最先出栈。","second":"栈遵循后进先出，最后入栈的元素最先出栈。","local":"栈遵循后进先山，最后入栈的元素最先出栈。","expected_auto":false},
+    {"id":"uncertain_image","before":"栈遵循后进先出，最后入栈的元素最先出栈。","first":"栈遵循后进先出，最后入栈的元素最先出栈。","second":"栈遵循后进先出，最后入栈的元素最先出栈。","uncertainties":["原页底部文字模糊。"],"expected_auto":false},
+    {"id":"no_geometry","before":"栈遵循后进先山，最后入栈的元素最先出栈。","first":"栈遵循后进先出，最后入栈的元素最先出栈。","second":"栈遵循后进先出，最后入栈的元素最先出栈。","no_geometry":true,"expected_auto":false},
+    {"id":"large_rewrite","before":"今天学习线性结构，包括栈和队列两种结构。","first":"栈是一种后进先出的线性数据结构，队列遵循先进先出。","second":"栈是一种后进先出的线性数据结构，队列遵循先进先出。","expected_auto":false}
+  ]
+}

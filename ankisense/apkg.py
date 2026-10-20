@@ -136,7 +136,7 @@ def _reviewed(card, store):
         if block is None or block["document_id"] != card["document_id"]:
             raise HTTPException(409, "卡片引用的原文缺失，请重新审核后导出。")
         blocks.append(SourceBlock.model_validate(block))
-    require_current_reviewed(store, blocks)
+    require_current_reviewed(store, blocks, card)
 
 
 def anki_model():

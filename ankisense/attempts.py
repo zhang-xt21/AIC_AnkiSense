@@ -89,7 +89,7 @@ class AttemptService:
         if card.get("source_outdated"):
             raise HTTPException(409, "题目的原文已更新，请更新引用并重新审核卡片。")
         blocks = self._sources(card)
-        require_current_reviewed(self.store, blocks)
+        require_current_reviewed(self.store, blocks, card)
         return blocks
 
     @staticmethod

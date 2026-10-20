@@ -1,9 +1,12 @@
 """Immutable source revisions alongside the existing four-field evidence blocks."""
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from fastapi import HTTPException
 
 from .ingest import text_blocks
+from .source_policy import source_usable, machine_verified
+from .automatic_policy import automatic_evidence_valid
 
 
 def page_id(document_id, page):
@@ -27,18 +30,19 @@ def page_records(document_id, extracted, revision=1, action="import"):
     return [("source_pages", record), ("source_revisions", snapshot)] + [("blocks", block) for block in blocks]
 
 
-def require_current_reviewed(store, blocks):
+def require_current_reviewed(store, blocks, card=None):
+    automatic = automatic_evidence_valid(card, blocks)
     for block in blocks:
         record = store.get("source_pages", page_id(block.document_id, block.page))
         if record is None:  # Existing text, demo and legacy PDF sources remain usable.
             continue
-        if record["status"] != "reviewed":
+        if not source_usable(record) and not automatic:
             raise HTTPException(409, f"请先对照原图校对并确认第 {block.page} 页文字。")
         if block.block_id not in record["block_ids"]:
             raise HTTPException(409, "原文已更新；请使用当前已校对版本重新生成卡片，或更新原文引用后再审核。")
 
 
-def save_page_revision(store, document_id, page, expected, replacement, action):
+def save_page_revision(store, document_id, page, expected, replacement, action, extra_records=()):
     def build():
         old = store.get("source_pages", page_id(document_id, page))
         if not old:
@@ -46,6 +50,8 @@ def save_page_revision(store, document_id, page, expected, replacement, action):
         if old["revision"] != expected:
             raise HTTPException(409, "此页已在其他操作中更新。编辑内容未保存，请刷新版本后核对再提交。")
         updated = {**old, **replacement, "page": page}
+        if action != "auto_calibrate":
+            updated.update(verification=None, calibration_id=None, calibration_status=None, calibration_issues=[])
         other_length = sum(len(item.get("text", "")) for item in store.all("source_pages")
                            if item["document_id"] == document_id and item["page"] != page)
         if len(updated.get("text", "")) > 50000 or other_length + len(updated.get("text", "")) > 100000:
@@ -57,6 +63,22 @@ def save_page_revision(store, document_id, page, expected, replacement, action):
                 records.append(("cards", {**card, "status": "draft", "source_outdated": True,
                                          "version": card["version"] + 1,
                                          "updated_at": records[0][1]["updated_at"]}))
-        return records
+        return records + list(extra_records)
 
+    return store.mutate(build)[0][1]
+
+
+def confirm_machine_page(store, document_id, page, expected, text):
+    """Human confirmation of identical text keeps immutable block identity."""
+    def build():
+        current = store.get("source_pages", page_id(document_id, page))
+        if (not current or current["revision"] != expected or current["text"] != text
+                or not machine_verified(current)):
+            raise HTTPException(409, "原文已变化，请刷新后重新确认。")
+        stamp = datetime.now(timezone.utc).isoformat()
+        updated = {**current, "status": "reviewed", "reviewed_at": stamp, "updated_at": stamp}
+        confirmation = {"id": "confirm-" + uuid4().hex, "document_id": document_id, "page": page,
+                        "revision": expected, "confirmed_at": stamp, "method": "human",
+                        "calibration_id": current.get("calibration_id")}
+        return [("source_pages", updated), ("source_confirmations", confirmation)]
     return store.mutate(build)[0][1]

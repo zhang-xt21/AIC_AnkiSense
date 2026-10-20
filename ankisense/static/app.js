@@ -6,12 +6,17 @@ const viewNames = { materials: "学习材料", review: "制卡工作台", practi
 const verdictNames = { correct: "回答正确", incomplete: "还不完整", incorrect: "需要修正", uncertain: "暂时无法判断" };
 const verdictColors = { correct: "green", incomplete: "amber", incorrect: "red", uncertain: "blue" };
 const statusNames = { draft: "待审核", approved: "已批准", rejected: "已拒绝" };
-const pageStatusNames = { pending: "待校对", reviewed: "已校对", empty: "已确认空白", failed: "识别失败" };
+const pageStatusNames = { pending: "待校对", reviewed: "已校对", auto_verified: "机器已核对", empty: "已确认空白", failed: "识别失败" };
 function sourcePageStatus(page) { return page.status === "empty" && !page.reviewed_at ? "未识别到文字" : pageStatusNames[page.status] || page.status; }
-function sourcePageConfirmed(page) { return page.status === "reviewed" || (page.status === "empty" && Boolean(page.reviewed_at)); }
+function sourcePageConfirmed(page) { return page.status === "reviewed" || (page.status === "auto_verified" && page.verification?.revision === page.revision) || (page.status === "empty" && Boolean(page.reviewed_at)); }
+app.sourceCalibrations = {};
 const proofStorageKey = "ankisense-proofreading-drafts-v1";
 const practiceStorageKey = "ankisense-practice-drafts-v1";
 const practiceFilterNames = { all: "全部", uncompleted: "未完成", completed: "已完成" };
+const autoStorageKey = "ankisense-auto-card-jobs-v1";
+const autoStatusNames = { pending: "已排队", running: "正在制卡", awaiting_confirmation: "等待确认原文", completed: "制卡完成", failed: "制卡未完成", cancelled: "已取消", outdated: "来源已更新" };
+Object.assign(app, { autoJobs: {}, autoLoaded: new Set(), autoLoading: new Set(), autoBusy: {}, autoErrors: {}, autoOptions: {}, autoTimers: {}, autoEpoch: {} });
+try { const saved = JSON.parse(sessionStorage.getItem(autoStorageKey) || "{}"); if (saved && typeof saved === "object" && !Array.isArray(saved)) app.autoJobs = saved; } catch { /* Job history is also saved by the service. */ }
 let toastTimer;
 try { app.practiceDrafts = JSON.parse(sessionStorage.getItem(practiceStorageKey) || "{}"); } catch { app.practiceDrafts = {}; }
 if (!app.practiceDrafts || typeof app.practiceDrafts !== "object" || Array.isArray(app.practiceDrafts)) app.practiceDrafts = {};
@@ -116,7 +121,7 @@ function blocksFor(id) {
 }
 function blockCanGenerate(block) {
   const page = sourcePagesFor(block.document_id).find(item => item.page === block.page);
-  return !page || page.status === "reviewed";
+  return !page || sourcePageConfirmed(page);
 }
 function proofKey(doc, page) { return `${doc.id}:${page.page}`; }
 function focusProofreader() { $("#source-proofreader")?.scrollIntoView({ block: "start", behavior: "instant" }); $("#proof-page-selector")?.focus({ preventScroll: true }); }
@@ -145,6 +150,188 @@ function showFeedback() {
   if (window.matchMedia("(max-width: 980px)").matches || bounds.top < 24 || bounds.bottom > window.innerHeight) (target.closest(".feedback-panel") || target).scrollIntoView({ block: "start", behavior: "instant" });
 }
 function modeIsCloud() { return app.data.mode === "cloud" && app.data.configured; }
+function autoRunning(job) { return ["pending", "running"].includes(job?.status); }
+function autoDocumentDirty(documentId) { return Object.keys(app.proofDrafts).some(key => key.startsWith(`${documentId}:`)); }
+function autoPath(documentId) { return `/api/documents/${encodeURIComponent(documentId)}/auto-card-jobs`; }
+function persistAutoJobs() { try { sessionStorage.setItem(autoStorageKey, JSON.stringify(app.autoJobs)); } catch { /* The server retains all jobs. */ } }
+function updateAutoPanel(documentId) {
+  if (app.view !== "materials" || app.documentId !== documentId) return;
+  const previous = $("#auto-card-console");
+  const doc = documentFor(documentId);
+  if (previous && doc) previous.replaceWith(renderAutoGenerationPanel(doc));
+}
+function updateAutoSources(documentId, state) {
+  app.data = state;
+  if (app.view !== "materials" || app.documentId !== documentId) return;
+  const doc = documentFor(documentId);
+  if (!doc) return;
+  // Update only source panes. Import forms and in-progress proofreading stay intact.
+  const proof = $("#source-proofreader");
+  if (proof && !app.proofBusy && !autoDocumentDirty(documentId)) {
+    const focused = document.activeElement?.id;
+    proof.replaceWith(renderProofreader(doc));
+    if (["proof-text", "proof-page-selector"].includes(focused)) $(`#${focused}`)?.focus({ preventScroll: true });
+  }
+  const source = $("#material-source-panel");
+  if (source) {
+    const scroll = source.querySelector(".source-scroll")?.scrollTop || 0;
+    source.replaceWith(renderSourcePanel());
+    const next = $("#material-source-panel .source-scroll");
+    if (next) next.scrollTop = scroll;
+  }
+}
+function rememberAutoJob(job) {
+  if (!job?.id || !job.document_id) return;
+  const jobs = Array.isArray(app.autoJobs[job.document_id]) ? app.autoJobs[job.document_id] : [];
+  const index = jobs.findIndex(item => item.id === job.id);
+  if (index < 0) jobs.unshift(job); else jobs[index] = job;
+  app.autoJobs[job.document_id] = jobs;
+  persistAutoJobs();
+  if (autoRunning(job)) scheduleAutoPoll(job);
+  else { clearTimeout(app.autoTimers[job.id]); delete app.autoTimers[job.id]; }
+}
+function scheduleAutoPoll(job, delay = 2000) {
+  if (app.autoTimers[job.id]) return;
+  app.autoTimers[job.id] = setTimeout(async () => {
+    delete app.autoTimers[job.id];
+    const epoch = app.autoEpoch[job.id] || 0;
+    try {
+      const current = await api(`/api/auto-card-jobs/${encodeURIComponent(job.id)}`);
+      if (epoch !== (app.autoEpoch[job.id] || 0)) return;
+      rememberAutoJob(current);
+      if (!autoRunning(current)) {
+        const state = await api("/api/state");
+        if (epoch !== (app.autoEpoch[job.id] || 0)) return;
+        updateAutoSources(job.document_id, state);
+      }
+      delete app.autoErrors[job.document_id];
+      updateAutoPanel(job.document_id);
+    } catch (error) {
+      if (epoch !== (app.autoEpoch[job.id] || 0)) return;
+      app.autoErrors[job.document_id] = `${error.message} 任务保存在本机，稍后会再次查询。`;
+      updateAutoPanel(job.document_id);
+      scheduleAutoPoll(job, 6000);
+    }
+  }, delay);
+}
+async function loadAutoJobs(documentId, force = false) {
+  if (app.autoLoading.has(documentId) || (!force && app.autoLoaded.has(documentId))) return;
+  app.autoLoading.add(documentId);
+  try {
+    const result = await api(autoPath(documentId));
+    app.autoJobs[documentId] = Array.isArray(result.jobs) ? result.jobs : [];
+    app.autoLoaded.add(documentId);
+    delete app.autoErrors[documentId];
+    persistAutoJobs();
+    for (const job of app.autoJobs[documentId]) if (autoRunning(job)) scheduleAutoPoll(job);
+  } catch (error) { app.autoErrors[documentId] = error.message; }
+  finally { app.autoLoading.delete(documentId); updateAutoPanel(documentId); }
+}
+async function autoJobOperation(doc, operation, job = null) {
+  if (app.autoBusy[doc.id]) return;
+  if (["start", "retry"].includes(operation) && autoDocumentDirty(doc.id)) return toast("请先保存或放弃此材料的校对修改，再自动制卡。", true);
+  if (["start", "retry"].includes(operation) && !modeIsCloud()) return toast("请先配置云端模型，再自动制卡。", true);
+  if (operation === "start" && (app.autoJobs[doc.id] || []).some(autoRunning)) return;
+  app.autoBusy[doc.id] = operation;
+  if (job) app.autoEpoch[job.id] = (app.autoEpoch[job.id] || 0) + 1;
+  delete app.autoErrors[doc.id];
+  updateAutoPanel(doc.id);
+  try {
+    const options = app.autoOptions[doc.id] || { max_cards: 30, image_mode: "recommend" };
+    if (operation === "start" && (!Number.isInteger(options.max_cards) || options.max_cards < 1 || options.max_cards > 60)) throw new Error("卡片上限应为 1–60 的整数。");
+    const path = operation === "start" ? autoPath(doc.id) : `/api/auto-card-jobs/${encodeURIComponent(job.id)}/${operation}`;
+    const result = await api(path, jsonOptions("POST", operation === "start" ? options : {}));
+    rememberAutoJob(result);
+    announce(`${doc.title}：${autoStatusNames[result.status] || result.message || "任务已更新"}`);
+  } catch (error) { app.autoErrors[doc.id] = error.message; }
+  finally { delete app.autoBusy[doc.id]; updateAutoPanel(doc.id); }
+}
+async function showAutoCards(doc, job) {
+  const initiatingDocument = app.documentId;
+  try {
+    const state = await api("/api/state");
+    app.data = state;
+    if (app.view !== "materials" || initiatingDocument !== doc.id || app.documentId !== doc.id) return;
+    const ids = new Set(job.card_ids || []);
+    app.cardId = app.data.cards.find(card => ids.has(card.id))?.id || null;
+    app.reviewDocument = doc.id;
+    app.reviewFilter = "all";
+    setView("review");
+  } catch (error) { toast(error.message, true); }
+}
+function renderAutoIssues(issues) {
+  const evidenceText = issue => typeof issue.evidence === "string" ? issue.evidence : (issue.evidence || []).map(item => {
+    const source = app.data.blocks.find(block => block.block_id === item.block_id);
+    return `${source ? sourceLabel(source) : "原文依据"}：${item.quote || ""}`;
+  }).join("\n");
+  const blockLabels = issue => [...new Set((issue.block_ids || []).map(id => app.data.blocks.find(block => block.block_id === id)).filter(Boolean).map(sourceLabel))].join("、");
+  return el("ul", { class: "auto-issues" }, ...issues.map(issue => el("li", {},
+    el("div", { class: "auto-issue-heading" }, badge(issue.severity === "error" ? "需修正" : "需核对", issue.severity === "error" ? "red" : "amber"), text("strong", issue.reason || issue.code || "请核对此疑点")),
+    issue.page ? text("p", `来源：第 ${issue.page} 页`, "helper") : null,
+    blockLabels(issue) ? text("p", `原文位置：${blockLabels(issue)}`, "helper") : null,
+    evidenceText(issue) ? text("p", evidenceText(issue), "auto-issue-evidence") : null,
+    issue.suggestion ? text("p", issue.suggestion, "helper") : null)));
+}
+function renderAutoGenerationPanel(doc) {
+  const jobs = Array.isArray(app.autoJobs[doc.id]) ? app.autoJobs[doc.id] : [];
+  const job = jobs[0];
+  const active = jobs.some(autoRunning);
+  const busy = Boolean(app.autoBusy[doc.id]);
+  const options = active ? { max_cards: 30, image_mode: "recommend", ...jobs.find(autoRunning)?.options }
+    : (app.autoOptions[doc.id] ||= { max_cards: 30, image_mode: "recommend" });
+  const dirty = autoDocumentDirty(doc.id);
+  const body = el("section", { id: "auto-card-console", class: "auto-card-console", "aria-label": "自动制卡控制台", "aria-busy": String(busy) });
+  const maxCards = el("input", { type: "number", min: "1", max: "60", step: "1", value: options.max_cards, disabled: active || busy, "aria-label": "自动制卡张数上限" });
+  maxCards.addEventListener("input", () => { options.max_cards = Number(maxCards.value); });
+  const imageMode = el("select", { disabled: active || busy, "aria-label": "自动配图方式" }, ...[["recommend", "本机推荐配图"], ["off", "仅生成文字"], ["checked", "配图并云端检查"]].map(([value, label]) => el("option", { value, selected: options.image_mode === value }, label)));
+  const imageHint = text("p", options.image_mode === "checked" ? "已选择云端检查：会发送候选裁图、对应原页和卡片内容给所配置的模型。" : options.image_mode === "recommend" ? "配图推荐在本机处理引用页；准备候选后供你核对采纳。" : "本次只生成文字卡片。", "helper auto-image-hint");
+  const sourceOption = doc.file_url ? el("input", { type: "checkbox", checked: options.source_mode === "visual", disabled: active || busy, "aria-label": "自动校准原页并继续制卡" }) : null;
+  if (sourceOption) sourceOption.addEventListener("change", () => { if (sourceOption.checked) options.source_mode = "visual"; else delete options.source_mode; });
+  imageMode.addEventListener("change", () => { options.image_mode = imageMode.value; imageHint.textContent = imageMode.value === "checked" ? "已选择云端检查：会发送候选裁图、对应原页和卡片内容给所配置的模型。" : imageMode.value === "recommend" ? "配图推荐在本机处理引用页；准备候选后供你核对采纳。" : "本次只生成文字卡片。"; });
+  const start = button(busy && app.autoBusy[doc.id] === "start" ? "正在提交…" : "整份材料自动制卡 →", () => autoJobOperation(doc, "start"), "btn", busy || active || dirty || !modeIsCloud() || !app.autoLoaded.has(doc.id));
+  start.dataset.autoStart = "";
+  body.append(text("h3", "整份材料自动制卡"), text("p", "自动整理知识点并分批生成草稿，再检查答案、依据与疑点。张数是上限，不会为凑数重复出题。", "helper"), el("div", { class: "auto-card-options" }, field("卡片上限", maxCards), field("配图方式", imageMode)), imageHint,
+    sourceOption ? field("自动校准原页并继续制卡", sourceOption, "主动开启后，每个待确认原页会发送给模型读取两次；可靠修正自动采用，其余疑点等你确认。需要模型支持图片输入。") : null, start,
+    text("p", dirty ? "有未保存的校对修改，请先保存或放弃。" : !modeIsCloud() ? "请先到模型设置配置云端模型。" : "疑点来源需要你确认；机器检查通过后，卡片仍需人工审核。", "helper auto-start-hint"));
+  if (app.autoErrors[doc.id]) body.append(el("div", { class: "notice error", role: "alert" }, app.autoErrors[doc.id], button("重新查询任务", () => loadAutoJobs(doc.id, true), "btn quiet small", busy)));
+  if (job) {
+    const total = Number(job.progress?.total) || 0;
+    const completed = Number(job.progress?.completed) || 0;
+    const status = el("div", { class: "auto-job-state", "data-job-id": job.id, "data-job-status": job.status },
+      el("div", { class: "auto-job-heading" }, badge(autoStatusNames[job.status] || job.status, job.status === "completed" ? "green" : ["failed", "outdated"].includes(job.status) ? "red" : "blue"), text("span", `${completed} / ${total} 批 · ${(job.card_ids || []).length} 张草稿`, "meta")),
+      el("progress", { value: completed, max: Math.max(1, total), "aria-label": `自动制卡进度：${completed} / ${total} 批` }), text("p", job.message || "任务已保存。", "helper"));
+    if (job.error && job.error !== job.message) status.append(note(typeof job.error === "string" ? job.error : "本次处理未完成，请查看疑点后重试。", "error"));
+    const controls = el("div", { class: "two-buttons" });
+    if ((job.card_ids || []).length) controls.append(button("查看已生成卡片 →", () => showAutoCards(doc, job), "btn secondary small", busy));
+    if (autoRunning(job)) controls.append(button("取消任务", () => autoJobOperation(doc, "cancel", job), "btn quiet small", busy));
+    if (["awaiting_confirmation", "failed", "cancelled"].includes(job.status)) controls.append(button(job.status === "awaiting_confirmation" ? "已确认原文，继续制卡" : "重试未完成部分", () => autoJobOperation(doc, "retry", job), "btn secondary small", busy || dirty || !modeIsCloud()));
+    if (job.status === "awaiting_confirmation") controls.append(button("定位待确认原文 ↑", () => { const page = (job.issues || []).find(issue => issue.page)?.page; if (page) app.sourcePage[doc.id] = page; render(); focusProofreader(); }, "btn quiet small"));
+    status.append(controls);
+    if (job.issues?.length) status.append(el("details", { class: "auto-job-issues", open: job.status === "awaiting_confirmation" ? "" : null }, text("summary", `${job.issues.length} 项疑点与处理建议`), renderAutoIssues(job.issues)));
+    body.append(status);
+    if (jobs.length > 1) body.append(el("details", { class: "auto-job-history" }, text("summary", `历史任务 · ${jobs.length - 1} 次`), ...jobs.slice(1).map(item => el("div", { class: "auto-history-row" }, text("span", `${autoStatusNames[item.status] || item.status} · ${(item.card_ids || []).length} 张 · ${formatDate(item.created_at)}`, "helper"), (item.card_ids || []).length ? button("查看卡片", () => showAutoCards(doc, item), "btn quiet small") : null))));
+  } else if (app.autoLoading.has(doc.id)) body.append(text("p", "正在查询本材料的任务…", "helper"));
+  return body;
+}
+function renderAutoCardQuality(card, draft) {
+  const quality = card.auto_quality;
+  if (!quality && !card.auto_job_id) return null;
+  const stale = Boolean(draft.dirty || card.source_outdated || quality?.verdict === "stale" || (quality && quality.card_version !== card.version));
+  const verdict = stale ? "stale" : quality?.verdict || "not_checked";
+  const names = { clear: "文字检查未发现明显疑点", needs_review: "有疑点需要核对", stale: "检查结果已过期", not_checked: "尚未完成机器检查" };
+  const result = el("section", { class: `auto-card-quality ${verdict}`, "data-auto-quality": "", "data-quality-verdict": verdict, "aria-label": "自动制卡质量检查" },
+    el("div", { class: "auto-issue-heading" }, text("h3", "自动制卡检查"), badge(names[verdict] || names.not_checked, verdict === "clear" ? "green" : "amber")),
+    text("p", stale ? "文字、评分要点、引用或配图已有变化。下方保留旧版检查供核对，不能作为当前版本已通过的依据。" : `检查对应卡片版本 ${quality?.card_version || card.version}。机器建议仍需对照讲义审核。`, "helper"));
+  if (quality?.issues?.length) result.append(renderAutoIssues(quality.issues));
+  if (card.image_result) result.append(text("p", `配图：${card.image_result.message || card.image_result.status || "待处理"}`, "helper"));
+  result.append(button("重新检查已保存卡片", () => cardEditOperation(card, "quality", async () => {
+    await api(`/api/cards/${encodeURIComponent(card.id)}/auto-quality-check`, jsonOptions("POST", { expected_version: card.version }));
+    await refresh();
+    toast("已重新检查当前卡片，请核对结果与原文。");
+  }), "btn secondary small", Boolean(draft.dirty || app.cardEditBusy || card.source_outdated || !modeIsCloud())));
+  if (draft.dirty) result.append(text("p", "先保存草稿，再检查修改后的内容。", "helper"));
+  return result;
+}
 function demoButton(className = "btn secondary") {
   const btn = button("导入演示材料", () => actionWithButton(btn, "正在导入…", async () => {
     await api("/api/demo", { method: "POST" });
@@ -167,6 +354,7 @@ function render() {
   $("#breadcrumb-current").textContent = viewNames[app.view];
   $("#mode-status").textContent = app.data.mode === "demo" ? "演示模式 · 本地规则反馈" : app.data.configured ? `云端模式 · ${app.data.model || "已配置模型"}` : "云端模式 · 待配置 API Key";
   const main = $("#main");
+  const manualOpen = main.querySelector("#manual-tools")?.open;
   const oldGrid = main.querySelector(".workbench-grid");
   const scrollPositions = oldGrid && oldGrid.dataset.cardId === app.cardId ? ["source", "editor", "preview"].map(name => [name, oldGrid.querySelector(`.workbench-${name} > .panel-body`)?.scrollTop || 0]) : [];
   if (app.view !== "settings" && app.settingsPanel) {
@@ -174,7 +362,8 @@ function render() {
     app.settingsPanel = null;
   }
   main.dataset.view = app.view;
-  main.replaceChildren(({ materials: renderMaterials, review: renderReview, practice: renderPractice, export: renderExport, settings: renderModelSettings })[app.view]());
+  main.replaceChildren(({ materials: renderMaterials, cards: renderCards, review: renderReview, practice: renderPractice, export: renderExport, settings: renderModelSettings })[app.view]());
+  if (manualOpen && main.querySelector("#manual-tools")) main.querySelector("#manual-tools").open = true;
   if (main.querySelector(".workbench-grid")?.dataset.cardId === oldGrid?.dataset.cardId) {
     for (const [name, position] of scrollPositions) {
       const body = main.querySelector(`.workbench-${name} > .panel-body`);
@@ -188,24 +377,27 @@ function renderModelSettings() {
 }
 
 function renderMaterials() {
-  const page = el("div", {}, heading("01 / 学习材料", "从一份讲义，开始理解", "把课程中的关键知识，整理成有依据、可练习的学习卡片。", [demoButton(), button("查看卡片  →", () => setView("review"))]));
+  const page = el("div", {}, heading("01 / 学习材料", "导入讲义，卡牌自动生成", "选择文件后，系统自动处理，完成后直接显示卡牌。", [demoButton(), button("查看卡片  →", () => setView("cards"))]));
+  page.append(renderAutomaticImport());
   if (app.data.documents.length) page.append(el("div", { class: "workspace-summary", "aria-label": "学习空间概览" }, ...[
     [app.data.documents.length, "份学习材料"],
-    [app.data.cards.filter(card => card.status === "draft").length, "张卡片待审核"],
+    [app.data.cards.filter(card => card.status === "draft").length, "张卡片附有疑点"],
     [app.data.cards.filter(card => card.status === "approved").length, "张卡片可练习"]
   ].map(([count, label]) => el("div", { class: "summary-item" }, text("strong", String(count).padStart(2, "0")), text("span", label)))));
   page.append(el("div", { class: "flow" }, ...[
-    ["01", "导入并校对原文", "文字 / 扫描 PDF 或纯文本"],
-    ["02", "审核卡片与依据", "确认问题、答案和原文"],
-    ["03", "练习并获得反馈", "发现遗漏，回到知识点"]
+    ["01", "选择讲义", "PPT / PPTX / PDF"],
+    ["02", "系统自动处理", "识别、制卡、检查与原页配图"],
+    ["03", "直接得到卡牌", "阅读、练习或导出至 Anki"]
   ].map(([n, title, desc]) => el("div", { class: "flow-step" }, text("span", n, "step-number"), el("div", {}, text("strong", title), text("small", desc))))));
   const currentDocument = documentFor(app.documentId);
-  if (currentDocument && sourcePagesFor(currentDocument.id).length) page.append(renderProofreader(currentDocument));
+  const advanced = el("details", { id: "manual-tools", class: "manual-tools" }, el("summary", {}, "高级工具：原文校对、手动制卡与编辑（可选）"));
+  if (currentDocument && sourcePagesFor(currentDocument.id).length) advanced.append(renderProofreader(currentDocument));
   const left = el("div", { class: "stack" }, renderImportPanel());
   if (app.data.documents.length) left.append(renderDocumentList());
   left.append(el("div", { class: "demo-card" }, text("span", "⌘", "demo-symbol"), el("div", {}, text("h3", "还没有准备好讲义？"), text("p", "先用自编的「栈与队列」示例走通流程。")), demoButton("btn secondary small")));
   const right = app.documentId ? renderSourcePanel() : panel("材料原文", "导入后，可按页选择用于生成卡片的片段", empty("让知识有一个可靠的起点", "选择 PDF 或粘贴课程原文。也可以先导入演示材料，体验栈与队列的学习流程。", demoButton(), "▤"), badge("来源可追溯", "green"));
-  page.append(el("div", { class: "grid" }, left, right));
+  advanced.append(el("div", { class: "grid" }, left, right));
+  page.append(advanced);
   return page;
 }
 function renderImportPanel() {
@@ -298,6 +490,43 @@ async function updateSourcePage(doc, sourcePage, action) {
     render();
   }
 }
+async function calibrateSourcePage(doc, sourcePage, readOnly = false) {
+  if (app.proofBusy || (!readOnly && app.proofDrafts[proofKey(doc, sourcePage)])) return;
+  const key = proofKey(doc, sourcePage);
+  app.proofBusy = key;
+  delete app.proofErrors[key];
+  render();
+  try {
+    const path = `/api/documents/${encodeURIComponent(doc.id)}/pages/${sourcePage.page}/calibration`;
+    const previous = app.sourceCalibrations[`${key}:${sourcePage.revision}`];
+    const report = await api(path, readOnly ? {} : jsonOptions("POST", { revision: sourcePage.revision, force: previous?.status === "needs_confirmation" }));
+    app.sourceCalibrations[`${key}:${sourcePage.revision}`] = report;
+    if (report.applied_revision) app.sourceCalibrations[`${key}:${report.applied_revision}`] = report;
+    await refresh();
+    if (!readOnly) toast(report.status === "auto_applied" ? "本页已完成机器核对，可继续自动制卡；请在卡片审核时检查原文。" : "校准结果有疑点，请查看差异并确认。注意：候选文字尚未覆盖原文。");
+  } catch (error) { app.proofErrors[key] = error.message; }
+  finally { app.proofBusy = null; render(); }
+}
+function renderSourceCalibration(doc, sourcePage, draft, busy) {
+  if (!doc.file_url) return null;
+  const key = proofKey(doc, sourcePage);
+  const report = app.sourceCalibrations[`${key}:${sourcePage.revision}`];
+  const section = el("section", { class: "source-calibration", "aria-label": "原页自动校准" }, text("h3", "原页自动校准"),
+    text("p", "对照原始页面校准文字。点击会把本页原图发送给当前模型读取两次；疑点和关键内容变化会保留待确认。", "helper"),
+    el("div", { class: "two-buttons" }, button(busy ? "正在处理…" : "对照原页自动校准（云端）", () => calibrateSourcePage(doc, sourcePage), "btn secondary small", busy || Boolean(draft) || sourcePageConfirmed(sourcePage) || !modeIsCloud()),
+      button("查看校准差异", () => calibrateSourcePage(doc, sourcePage, true), "btn quiet small", busy)));
+  section.querySelector("button").dataset.sourceCalibrate = "";
+  if (sourcePage.status === "auto_verified") section.append(note("本页通过机器核对，可用于制卡。这个标记与人工校对分别记录，卡片仍需你审核。"));
+  if (report && report.status !== "not_checked") {
+    section.append(text("p", report.status === "auto_applied" ? "已自动采用并保存新来源版本。" : "候选文字等待确认，原始识别与历史版本保留。", "helper"));
+    if (report.issues?.length) section.append(el("ul", {}, ...report.issues.map(reason => text("li", reason))));
+    if (report.changes?.length) section.append(el("div", { class: "source-calibration-changes" }, ...report.changes.map(change => el("div", {}, text("del", change.before || "（新增）"), text("span", " → "), text("ins", change.after || "（删除）")))));
+    if (report.proposed_text && report.status === "needs_confirmation") section.append(
+      el("details", {}, text("summary", "查看完整候选文字"), text("p", report.proposed_text, "source-text")),
+      button("将建议载入校对框", () => { app.proofDrafts[key] = { text: report.proposed_text, revision: sourcePage.revision, baseText: sourcePage.text }; keepProofDrafts(); render(); $("#proof-text")?.focus(); }, "btn secondary small", busy || Boolean(draft)));
+  } else if (report) section.append(text("p", "此版本尚无校准结果。", "helper"));
+  return section;
+}
 function renderProofreader(doc) {
   const pages = sourcePagesFor(doc.id);
   const sourcePage = pages.find(item => item.page === app.sourcePage[doc.id]) || pages.find(item => !sourcePageConfirmed(item)) || pages[0];
@@ -307,13 +536,14 @@ function renderProofreader(doc) {
   const conflict = Boolean(draft && draft.revision !== sourcePage.revision);
   const busy = Boolean(app.proofBusy);
   const reviewed = pages.filter(sourcePageConfirmed).length;
+  const machineCount = pages.filter(item => item.status === "auto_verified" && sourcePageConfirmed(item)).length;
   const body = el("div", { class: "proofreader-body" });
   const select = el("select", { id: "proof-page-selector", "aria-label": "选择校对页", disabled: busy }, ...pages.map(item => el("option", { value: item.page, selected: sourcePage.page === item.page }, `第 ${item.page} 页 · ${sourcePageStatus(item)}${app.proofDrafts[proofKey(doc, item)] ? " · 有未保存修改" : ""}`)));
   select.addEventListener("change", () => { app.sourcePage[doc.id] = Number(select.value); render(); $("#proof-page-selector")?.focus(); });
   const pageIndex = pages.indexOf(sourcePage);
   function turnPage(offset) { app.sourcePage[doc.id] = pages[pageIndex + offset].page; render(); $("#proof-page-selector")?.focus(); }
   const navigation = el("div", { class: "proof-page-navigation" }, button("← 上一页", () => turnPage(-1), "btn secondary small", busy || pageIndex === 0), select, button("下一页 →", () => turnPage(1), "btn secondary small", busy || pageIndex === pages.length - 1));
-  body.append(el("div", { class: "proof-toolbar" }, navigation, el("div", { class: "proof-progress" }, text("span", `${reviewed} / ${pages.length} 页已确认`, "meta"), el("progress", { value: reviewed, max: pages.length, "aria-label": "页面校对进度" }))));
+  body.append(el("div", { class: "proof-toolbar" }, navigation, el("div", { class: "proof-progress" }, text("span", `${reviewed} / ${pages.length} 页可制卡 · ${machineCount} 页机器核对`, "meta"), el("progress", { value: reviewed, max: pages.length, "aria-label": "页面校对进度" }))));
   if (sourcePage.error) body.append(note(sourcePage.error, "error"));
   if (app.proofErrors[key]) body.append(el("div", { class: "notice error", role: "alert" }, app.proofErrors[key]));
   if (conflict) body.append(el("div", { class: "proof-conflict" }, note(`此页已有更新版本 v${sourcePage.revision}。你的草稿基于 v${draft.revision}，请先对照，避免覆盖其他修改。`, "warning"), el("details", { open: "" }, text("summary", `查看最新已保存的文字 · v${sourcePage.revision}`), text("p", sourcePage.text || "（空白）", "source-text")), button("以此草稿继续校对新版本", () => { app.proofDrafts[key] = { text: draft.text, revision: sourcePage.revision, baseText: sourcePage.text }; keepProofDrafts(); delete app.proofErrors[key]; render(); }, "btn secondary small", busy)));
@@ -340,10 +570,15 @@ function renderProofreader(doc) {
     dirtyNote.textContent = dirty ? "有未保存修改 · 切换页面时保留在此标签页中" : "对照原图检查文字、符号与顺序，确认后再用于制卡。";
     save.textContent = input.value.trim() ? "保存并确认校对 ✓" : "保存并确认空白 ✓";
     reocr.disabled = busy || dirty;
+    const calibrate = body.querySelector("[data-source-calibrate]");
+    if (calibrate) calibrate.disabled = busy || dirty || sourcePageConfirmed(sourcePage) || !modeIsCloud();
     discard.hidden = !dirty;
+    updateAutoPanel(doc.id);
   });
   const statusColor = sourcePageConfirmed(sourcePage) ? "green" : sourcePage.status === "failed" ? "red" : "amber";
   const editor = el("div", { class: "proof-editor" }, el("div", { class: "proof-column-heading" }, text("h3", "校对后的原文"), badge(sourcePageStatus(sourcePage), statusColor)), field(`第 ${sourcePage.page} 页 · ${sourcePage.method === "ocr" ? "本地 OCR" : "PDF 内置文字"} · 版本 ${sourcePage.revision}`, input), dirtyNote, el("div", { class: "proof-actions" }, save, reocr), discard, text("p", "重新识别会保留旧版本，并将本页重新标记为待校对。已有修改请先保存或放弃。", "helper"));
+  const calibrationPanel = renderSourceCalibration(doc, sourcePage, draft, busy);
+  if (calibrationPanel) editor.append(calibrationPanel);
   editor.append(el("details", { class: "proof-raw" }, text("summary", "查看原始识别文字"), text("p", `${sourcePage.method === "ocr" ? "OCR" : "文字提取"}${sourcePage.engine ? ` · ${sourcePage.engine}` : ""}${sourcePage.engine_version ? ` ${sourcePage.engine_version}` : ""}`, "meta"), text("p", sourcePage.raw_text || "（未识别出文字）", "source-text")));
   body.append(el("div", { class: "proof-columns" }, imageRegion, editor));
   const proof = panel("逐页校对", `${doc.title} · 对照原图确认后，文字才可用于生成卡片`, body, badge("本机处理", "green"));
@@ -357,9 +592,11 @@ function renderSourcePanel() {
   const pages = sourcePagesFor(doc.id);
   const selectedCount = () => blocks.filter(b => blockCanGenerate(b) && app.selectedBlocks.has(b.block_id)).length;
   const body = el("div");
+  body.append(renderAutoGenerationPanel(doc));
+  if (!app.autoLoaded.has(doc.id) && !app.autoLoading.has(doc.id) && !app.autoErrors[doc.id]) void loadAutoJobs(doc.id);
   if (doc.is_demo) body.append(note("这是一份为验证流程而自编的「栈与队列」示例，不是真实课程讲义。演示卡片仍需人工审核后才能练习和导出。", "warning"));
   if (doc.warning && !doc.is_demo) body.append(note(doc.warning, "warning"));
-  if (pages.length) body.append(el("div", { class: "source-review-summary" }, text("span", "仅已校对页面可用于制卡。修正原文后，相关卡片需要重新审核。", "helper"), button("前往逐页校对 ↑", focusProofreader, "btn quiet small")));
+  if (pages.length) body.append(el("div", { class: "source-review-summary" }, text("span", "人工或机器核对的来源可用于制卡；有疑点的页面等待确认。修正原文后，相关卡片需要重新审核。", "helper"), button("前往逐页校对 ↑", focusProofreader, "btn quiet small")));
   const selectionCount = text("span", `已选 ${selectedCount()} 个片段 · 每次最多 6 个`, "helper");
   const generate = button("生成 3 张卡片草稿  →", () => actionWithButton(generate, "正在生成草稿…", async () => {
     const ids = blocks.filter(b => blockCanGenerate(b) && app.selectedBlocks.has(b.block_id)).map(b => b.block_id);
@@ -395,7 +632,9 @@ function renderSourcePanel() {
     sources.append(el("article", { class: `source-block${check.checked ? " selected" : ""}${eligible ? "" : " source-unreviewed"}` }, el("div", { class: "source-top" }, el("label", {}, check, sourceLabel(block), sourcePage ? badge(sourcePageStatus(sourcePage), eligible ? "green" : "amber") : null), text("span", block.block_id, "source-id")), text("p", block.text, "source-text"), !eligible ? button("校对此页 →", () => { app.sourcePage[doc.id] = block.page; render(); focusProofreader(); }, "btn quiet small") : null));
   }
   body.append(sources);
-  return panel(doc.title, `${doc.filename || "文本材料"} · ${blocks.length} 个当前原文片段`, body, badge(doc.is_demo ? "自编演示" : "本地材料", doc.is_demo ? "amber" : "green"));
+  const result = panel(doc.title, `${doc.filename || "文本材料"} · ${blocks.length} 个当前原文片段`, body, badge(doc.is_demo ? "自编演示" : "本地材料", doc.is_demo ? "amber" : "green"));
+  result.id = "material-source-panel";
+  return result;
 }
 
 function renderReview() {
@@ -519,6 +758,13 @@ function renderCardEditor(card) {
   const errorNode = text("div", app.cardEditErrors[card.id] || "", "inline-error");
   errorNode.setAttribute("role", "alert");
   const form = el("form", { class: "workbench-form" }, card.is_demo ? text("p", "自编演示卡片 · 请核对讲义后批准", "helper") : null, field("问题", question), field("参考答案", answer), el("div", { class: "field-row" }, field("知识概念", concept), field("卡片用途", kind)), renderCardImageEditor(card, draft), renderRubricFields(card, draft, busy), renderEvidenceFields(card, draft, busy));
+  const autoQuality = renderAutoCardQuality(card, draft);
+  if (autoQuality) {
+    form.prepend(autoQuality);
+    const updateQuality = () => form.querySelector("[data-auto-quality]")?.replaceWith(renderAutoCardQuality(card, draft));
+    form.addEventListener("input", updateQuality);
+    form.addEventListener("change", updateQuality);
+  }
   if (app.cardEditConflicts?.[card.id]) form.prepend(el("div", { class: "notice warning" }, text("p", "保存版本冲突。请先保留你需要的修改，再载入最新版本重新编辑。"), button("载入最新版本", () => {
     if (!window.confirm("载入最新版本将替换这张卡片当前未保存的编辑。请先复制保留需要的内容，是否继续？")) return;
     cardEditOperation(card, "reload", async () => {
@@ -913,10 +1159,13 @@ function renderExport() {
 for (const nav of document.querySelectorAll("[data-view]")) nav.addEventListener("click", () => setView(nav.dataset.view));
 async function initialize() {
   try {
+    initializeAutomaticWorkspace();
     const params = new URLSearchParams(window.location.search);
     const id = params.get("card") || params.get("card_id");
     if (id) { app.practiceId = id; app.view = "practice"; }
     await refresh();
+    await loadMaterialImports(true);
+    for (const jobs of Object.values(app.autoJobs)) if (Array.isArray(jobs)) for (const job of jobs) if (autoRunning(job)) scheduleAutoPoll(job);
     if (id && !app.data.cards.some(c => c.id === id && c.status === "approved")) toast("此卡片不存在或尚未批准，请先到卡片审核页检查。", true);
   } catch (error) {
     $("#mode-status").textContent = "本地服务未连接";
