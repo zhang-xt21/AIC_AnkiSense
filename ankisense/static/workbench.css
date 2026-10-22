@@ -1,9 +1,12 @@
 /* Visual authoring workspace. Existing practice and export styles stay shared. */
-.workbench-toolbar { display: grid; grid-template-columns: minmax(145px, .85fr) minmax(130px, .6fr) minmax(220px, 1.7fr) auto; gap: 12px; align-items: end; margin-bottom: 18px; padding: 15px 17px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.workbench-toolbar { display: flex; flex-wrap: nowrap; align-items: end; gap: 12px; margin-bottom: 18px; padding: 15px 17px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
 .workbench-toolbar .field { margin: 0; min-width: 0; }
+.workbench-toolbar .field:nth-child(1) { flex: 0 1 150px; }
+.workbench-toolbar .field:nth-child(2) { flex: 0 1 135px; }
+.workbench-toolbar .field:nth-child(3) { flex: 1 1 220px; }
 .workbench-toolbar .field > span { font-size: 12px; margin-bottom: 5px; }
 .workbench-toolbar select { font-size: 13px; text-overflow: ellipsis; }
-.workbench-pager { display: flex; align-items: center; gap: 7px; min-height: 46px; white-space: nowrap; }
+.workbench-pager { display: flex; align-items: center; gap: 7px; min-height: 46px; white-space: nowrap; flex: 0 0 auto; }
 .workbench-pager .btn { padding-inline: 10px; font-size: 12px; }
 .workbench-grid { display: grid; grid-template-columns: minmax(225px, .95fr) minmax(335px, 1.38fr) minmax(255px, 1fr); align-items: start; gap: 16px; }
 .workbench-grid > .panel { min-width: 0; overflow: hidden; }
@@ -66,8 +69,6 @@
 .settings-navigation { margin-top: 22px; }
 .workbench-mobile-tabs { display: none; }
 @media (max-width: 1350px) and (min-width: 981px) {
-  .workbench-toolbar { grid-template-columns: minmax(0, 1fr) minmax(0, .85fr); }
-  .workbench-pager { justify-content: flex-end; }
   .workbench-grid { grid-template-columns: minmax(240px, .85fr) minmax(330px, 1.3fr); }
   .workbench-source { grid-row: span 2; }
   .workbench-preview { grid-column: 2; }
@@ -75,8 +76,6 @@
 }
 @media (max-width: 980px) {
   main[data-view="review"] { padding-inline: 16px; }
-  .workbench-toolbar { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .workbench-pager { justify-content: flex-end; }
   .workbench-grid { grid-template-columns: minmax(0, 1fr); }
   .workbench-grid > .panel > .panel-body { height: auto; max-height: none; }
   .workbench-mobile-tabs { display: flex; gap: 6px; margin-bottom: 15px; }
@@ -87,7 +86,6 @@
 }
 @media (max-width: 540px) {
   .workbench-toolbar { gap: 10px; padding: 12px; }
-  .workbench-toolbar > .field:nth-child(3), .workbench-pager { grid-column: 1 / -1; }
   .workbench-pager { justify-content: space-between; }
   .workbench-grid > .panel > .panel-body { padding: 15px; }
   .workbench-save-bar { bottom: -15px; margin-inline: -15px; padding-inline: 15px; }

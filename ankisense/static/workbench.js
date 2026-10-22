@@ -50,7 +50,7 @@ function workbenchPreviewContent(card, draft) {
     body.append(el("hr", { class: "section-divider" }), text("p", "参考答案", "preview-eyebrow"), text("p", draft.answer || "参考答案将在这里显示", "preview-answer"), CardImages.gallery(backImages, app.data.media, "背面配图"));
     body.append(text("p", workbenchSourceLabel(card, draft), "preview-source-label"));
   } else body.append(text("div", "用自己的话回答…", "preview-answer-placeholder"));
-  return el("div", {}, body, text("p", `正面 ${frontImages.length} 张图 · 背面 ${backImages.length} 张图`, "helper preview-image-count"), text("p", "这里预览正在编辑的内容；练习与导出使用已保存、已批准的版本。", "helper"));
+  return el("div", {}, body, text("p", `正面 ${frontImages.length} 张图 · 背面 ${backImages.length} 张图`, "helper preview-image-count"));
 }
 function renderWorkbenchPreview(card, draft) {
   const tabs = el("div", { class: "preview-face-tabs", "aria-label": "预览卡片正反面" });
@@ -91,7 +91,7 @@ function renderWorkbenchSources(card, draft) {
     image.addEventListener("error", () => { open.replaceChildren(text("span", "原页图片无法加载，请打开原始 PDF 查看。", "helper")); open.disabled = true; });
     open.append(image, text("span", "点击放大原页 ↗", "helper"));
     content.append(open);
-  } else content.append(text("p", doc?.is_demo ? "自编演示材料 · 暂无 PDF 原页，可上传截图体验配图。" : "文本材料无原页图片，可从中间的配图区上传截图。", "helper"));
+  } else content.append(text("p", isDemoMode() && doc?.is_demo ? "自编演示材料 · 暂无 PDF 原页，可上传截图体验配图。" : "文本材料无原页图片，可从中间的配图区上传截图。", "helper"));
   if (sourcePage) content.append(badge(sourcePageStatus(sourcePage), sourcePageConfirmed(sourcePage) ? "green" : "amber"));
   const excerpts = el("div", { class: "workbench-excerpts" });
   for (const block of blocks.filter(block => block.page === pageNumber).sort((a, b) => Number(relevantIds.has(b.block_id)) - Number(relevantIds.has(a.block_id)))) {
@@ -120,7 +120,7 @@ function renderWorkbenchSources(card, draft) {
 function renderRubricFields(card, draft, busy) {
   const points = draft.rubric.map(point => ({ ...point }));
   const save = () => { draft.rubric = points.map(point => ({ ...point })); touchCardDraft(card, draft); };
-  const content = el("div", { class: "workbench-rubric" }, text("h3", "评分要点"), text("p", "一条只检查一个要点。AI 会据此指出回答中的遗漏与矛盾。", "helper"));
+  const content = el("div", { class: "workbench-rubric" }, text("h3", "评分要点"));
   points.forEach((point, index) => {
     const input = el("textarea", { rows: "2", maxlength: "1000", required: true, value: point.text, disabled: busy, "aria-label": `评分要点 ${index + 1}` });
     input.addEventListener("input", () => { point.text = input.value; save(); });
@@ -134,7 +134,7 @@ function renderEvidenceFields(card, draft, busy) {
   const blocks = app.data.blocks.filter(block => block.document_id === card.document_id);
   const currentIds = new Set(blocksFor(card.document_id).map(block => block.block_id));
   const save = () => { draft.evidence = JSON.stringify(refs); touchCardDraft(card, draft); };
-  const content = el("div", { class: "workbench-evidence" }, text("h3", "卡片依据"), text("p", "保留支持答案的原文。引用需与讲义一致，可在左侧加入新的原文片段。", "helper"));
+  const content = el("div", { class: "workbench-evidence" }, text("h3", "卡片依据"));
   refs.forEach((ref, index) => {
     const block = blocks.find(item => item.block_id === ref.block_id);
     const quote = el("textarea", { rows: "3", maxlength: "4000", required: true, disabled: busy, value: ref.quote, "aria-label": `原文引用 ${index + 1}` });

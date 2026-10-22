@@ -84,7 +84,7 @@ async function api(path, options = {}) {
 }
 function jsonOptions(method, body) { return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }; }
 async function refresh() {
-  app.data = await api("/api/state");
+  app.data = withoutDemoRecords(await api("/api/state"));
   for (const key of ["documents", "blocks", "cards", "attempts", "source_pages", "media"]) app.data[key] ||= [];
   if (!app.data.documents.some(item => item.id === app.documentId)) app.documentId = app.data.documents[0]?.id || null;
   const eligibleIds = new Set(app.data.documents.flatMap(doc => blocksFor(doc.id).filter(blockCanGenerate).map(block => block.block_id)));
@@ -150,6 +150,18 @@ function showFeedback() {
   if (window.matchMedia("(max-width: 980px)").matches || bounds.top < 24 || bounds.bottom > window.innerHeight) (target.closest(".feedback-panel") || target).scrollIntoView({ block: "start", behavior: "instant" });
 }
 function modeIsCloud() { return app.data.mode === "cloud" && app.data.configured; }
+function isDemoMode() { return app.data.mode === "demo"; }
+function withoutDemoRecords(data) {
+  if (!data || data.mode === "demo") return data;
+  const hidden = new Set((data.documents || []).filter(doc => doc.is_demo).map(doc => doc.id));
+  if (!hidden.size) return data;
+  return {
+    ...data,
+    documents: data.documents.filter(doc => !hidden.has(doc.id)),
+    cards: data.cards.filter(card => !card.is_demo && !hidden.has(card.document_id)),
+    blocks: data.blocks.filter(block => !hidden.has(block.document_id)),
+  };
+}
 function autoRunning(job) { return ["pending", "running"].includes(job?.status); }
 function autoDocumentDirty(documentId) { return Object.keys(app.proofDrafts).some(key => key.startsWith(`${documentId}:`)); }
 function autoPath(documentId) { return `/api/documents/${encodeURIComponent(documentId)}/auto-card-jobs`; }
@@ -333,6 +345,7 @@ function renderAutoCardQuality(card, draft) {
   return result;
 }
 function demoButton(className = "btn secondary") {
+  if (!isDemoMode()) return null;
   const btn = button("导入演示材料", () => actionWithButton(btn, "正在导入…", async () => {
     await api("/api/demo", { method: "POST" });
     app.selectedBlocks.clear();
@@ -346,6 +359,7 @@ function demoButton(className = "btn secondary") {
 
 function render() {
   if (!app.data) return;
+  app.data = withoutDemoRecords(app.data);
   for (const nav of document.querySelectorAll("[data-view]")) {
     const active = nav.dataset.view === app.view;
     nav.classList.toggle("active", active);
@@ -383,18 +397,13 @@ function renderMaterials() {
     [app.data.cards.filter(card => card.status === "draft").length, "张卡片附有疑点"],
     [app.data.cards.filter(card => card.status === "approved").length, "张卡片可练习"]
   ].map(([count, label]) => el("div", { class: "summary-item" }, text("strong", String(count).padStart(2, "0")), text("span", label)))));
-  page.append(el("div", { class: "flow" }, ...[
-    ["01", "选择讲义", "PPT / PPTX / PDF"],
-    ["02", "系统自动处理", "识别、制卡、检查与原页配图"],
-    ["03", "直接得到卡牌", "阅读、练习或导出至 Anki"]
-  ].map(([n, title, desc]) => el("div", { class: "flow-step" }, text("span", n, "step-number"), el("div", {}, text("strong", title), text("small", desc))))));
   const currentDocument = documentFor(app.documentId);
   const advanced = el("details", { id: "manual-tools", class: "manual-tools" }, el("summary", {}, "高级工具：原文校对、手动制卡与编辑（可选）"));
   if (currentDocument && sourcePagesFor(currentDocument.id).length) advanced.append(renderProofreader(currentDocument));
   const left = el("div", { class: "stack" }, renderImportPanel());
   if (app.data.documents.length) left.append(renderDocumentList());
-  left.append(el("div", { class: "demo-card" }, text("span", "⌘", "demo-symbol"), el("div", {}, text("h3", "还没有准备好讲义？"), text("p", "先用自编的「栈与队列」示例走通流程。")), demoButton("btn secondary small")));
-  const right = app.documentId ? renderSourcePanel() : panel("材料原文", "导入后，可按页选择用于生成卡片的片段", empty("让知识有一个可靠的起点", "选择 PDF 或粘贴课程原文。也可以先导入演示材料，体验栈与队列的学习流程。", demoButton(), "▤"), badge("来源可追溯", "green"));
+  if (isDemoMode() && !app.data.documents.length) left.append(el("div", { class: "demo-card" }, text("span", "⌘", "demo-symbol"), el("div", {}, text("h3", "还没有准备好讲义？"), text("p", "先用自编的「栈与队列」示例走通流程。")), demoButton("btn secondary small")));
+  const right = app.documentId ? renderSourcePanel() : panel("材料原文", "导入后，可按页选择用于生成卡片的片段", empty("让知识有一个可靠的起点", isDemoMode() ? "选择 PDF 或粘贴课程原文。也可以先导入演示材料，体验栈与队列的学习流程。" : "选择 PDF 或粘贴课程原文，开始整理卡片。", demoButton(), "▤"), badge("来源可追溯", "green"));
   advanced.append(el("div", { class: "grid" }, left, right));
   page.append(advanced);
   return page;
@@ -457,7 +466,7 @@ function renderImportPanel() {
   return panel("导入课程材料", "建议先选一个小节，便于逐条核对", body);
 }
 function renderDocumentList() {
-  return panel("已导入材料", `${app.data.documents.length} 份本地材料`, el("div", { class: "documents" }, ...app.data.documents.map(doc => button(el("span", { class: "document-info" }, text("strong", doc.title), text("span", `${doc.is_demo ? "自编演示 · " : ""}${blocksFor(doc.id).length} 个原文片段`, "meta")), () => { app.documentId = doc.id; app.selectedBlocks.clear(); render(); }, `document-row${doc.id === app.documentId ? " selected" : ""}`))));
+  return panel("已导入材料", `${app.data.documents.length} 份本地材料`, el("div", { class: "documents" }, ...app.data.documents.map(doc => button(el("span", { class: "document-info" }, text("strong", doc.title), text("span", `${isDemoMode() && doc.is_demo ? "自编演示 · " : ""}${blocksFor(doc.id).length} 个原文片段`, "meta")), () => { app.documentId = doc.id; app.selectedBlocks.clear(); render(); }, `document-row${doc.id === app.documentId ? " selected" : ""}`))));
 }
 async function updateSourcePage(doc, sourcePage, action) {
   if (app.proofBusy) return;
@@ -593,7 +602,7 @@ function renderSourcePanel() {
   const body = el("div");
   body.append(renderAutoGenerationPanel(doc));
   if (!app.autoLoaded.has(doc.id) && !app.autoLoading.has(doc.id) && !app.autoErrors[doc.id]) void loadAutoJobs(doc.id);
-  if (doc.is_demo) body.append(note("这是一份为验证流程而自编的「栈与队列」示例，不是真实课程讲义。演示卡片仍需人工审核后才能练习和导出。", "warning"));
+  if (isDemoMode() && doc.is_demo) body.append(note("这是一份为验证流程而自编的「栈与队列」示例，不是真实课程讲义。演示卡片仍需人工审核后才能练习和导出。", "warning"));
   if (doc.warning && !doc.is_demo) body.append(note(doc.warning, "warning"));
   if (pages.length) body.append(el("div", { class: "source-review-summary" }, text("span", "人工或机器核对的来源可用于制卡；有疑点的页面等待确认。修正原文后，相关卡片需要重新审核。", "helper"), button("前往逐页校对 ↑", focusProofreader, "btn quiet small")));
   const selectionCount = text("span", `已选 ${selectedCount()} 个片段 · 每次最多 6 个`, "helper");
@@ -631,7 +640,7 @@ function renderSourcePanel() {
     sources.append(el("article", { class: `source-block${check.checked ? " selected" : ""}${eligible ? "" : " source-unreviewed"}` }, el("div", { class: "source-top" }, el("label", {}, check, sourceLabel(block), sourcePage ? badge(sourcePageStatus(sourcePage), eligible ? "green" : "amber") : null), text("span", block.block_id, "source-id")), text("p", block.text, "source-text"), !eligible ? button("校对此页 →", () => { app.sourcePage[doc.id] = block.page; render(); focusProofreader(); }, "btn quiet small") : null));
   }
   body.append(sources);
-  const result = panel(doc.title, `${doc.filename || "文本材料"} · ${blocks.length} 个当前原文片段`, body, badge(doc.is_demo ? "自编演示" : "本地材料", doc.is_demo ? "amber" : "green"));
+  const result = panel(doc.title, `${doc.filename || "文本材料"} · ${blocks.length} 个当前原文片段`, body, badge(isDemoMode() && doc.is_demo ? "自编演示" : "本地材料", isDemoMode() && doc.is_demo ? "amber" : "green"));
   result.id = "material-source-panel";
   return result;
 }
@@ -640,7 +649,7 @@ function renderReview() {
   const all = app.data.cards;
   const approved = all.filter(c => c.status === "approved").length;
   const page = el("div", { class: "card-workspace" }, heading("制卡工作台", "把讲义，做成看得懂的卡片", "左边核对讲义，中间编辑内容，右边预览正反面。保存并批准后，就可以开始学习。", [button("导入讲义", () => setView("materials"), "btn secondary"), button("前往练习  →", () => setView("practice"), "btn", !approved)]));
-  if (!all.length) { page.append(panel("等待第一张卡片", "先从材料开始", empty("从一小节讲义开始制卡", "在学习材料中选取原文生成草稿，或先用演示卡片体验编辑与配图。", demoButton()))); return page; }
+  if (!all.length) { page.append(panel("等待第一张卡片", "先从材料开始", empty("从一小节讲义开始制卡", isDemoMode() ? "在学习材料中选取原文生成草稿，或先用演示卡片体验编辑与配图。" : "在学习材料中选取原文生成草稿。", demoButton()))); return page; }
   const course = el("select", { "aria-label": "筛选课程" }, el("option", { value: "all" }, "全部课程"), ...app.data.documents.map(doc => el("option", { value: doc.id, selected: doc.id === app.reviewDocument }, doc.title)));
   course.addEventListener("change", () => { app.reviewDocument = course.value; render(); });
   const courseCards = all.filter(c => !app.reviewDocument || app.reviewDocument === "all" || c.document_id === app.reviewDocument);
@@ -756,7 +765,7 @@ function renderCardEditor(card) {
   }
   const errorNode = text("div", app.cardEditErrors[card.id] || "", "inline-error");
   errorNode.setAttribute("role", "alert");
-  const form = el("form", { class: "workbench-form" }, card.is_demo ? text("p", "自编演示卡片 · 请核对讲义后批准", "helper") : null, field("问题", question), field("参考答案", answer), el("div", { class: "field-row" }, field("知识概念", concept), field("卡片用途", kind)), renderCardImageEditor(card, draft), renderRubricFields(card, draft, busy), renderEvidenceFields(card, draft, busy));
+  const form = el("form", { class: "workbench-form" }, isDemoMode() && card.is_demo ? text("p", "自编演示卡片 · 请核对讲义后批准", "helper") : null, field("问题", question), field("参考答案", answer), el("div", { class: "field-row" }, field("知识概念", concept), field("卡片用途", kind)), renderCardImageEditor(card, draft), renderRubricFields(card, draft, busy), renderEvidenceFields(card, draft, busy));
   const autoQuality = renderAutoCardQuality(card, draft);
   if (autoQuality) {
     form.prepend(autoQuality);
@@ -1017,7 +1026,7 @@ function partialFeedbackNeedsReview(attempt) {
 }
 function renderAttempt(attempt) {
   const body = el("div");
-  if (attempt.is_demo) body.append(note("演示反馈：由本地规则生成，仅用于验证流程。", "warning"));
+  if (isDemoMode() && attempt.is_demo) body.append(note("演示反馈：由本地规则生成，仅用于验证流程。", "warning"));
   if (attempt.status === "unanswered") {
     body.append(text("h3", "你还没有填写回答"), text("p", "未作答不会被记为回答错误。写下你的理解后，再提交分析。", "helper"));
     return feedbackPanel("本次反馈", "未作答", body);
@@ -1128,7 +1137,7 @@ function renderExport() {
     badge("推荐 · Anki 牌组包", "green"), text("h2", "一个文件，带上完整卡片"),
     text("p", hasImages ? `其中 ${imageCards.length} 张带配图 · 图片、来源与卡片样式一起打包` : "题目、答案、来源与卡片样式一起打包", "helper"),
     el("hr", { class: "section-divider" }),
-    approved.some(c => c.is_demo) ? note("导出中包含自编演示卡片，来源信息会保留演示标记。", "warning") : null,
+    isDemoMode() && approved.some(c => c.is_demo) ? note("导出中包含自编演示卡片，来源信息会保留演示标记。", "warning") : null,
     downloads,
     text("p", "在 Anki 中直接导入 .apkg，无需解压或手动建立字段。题目配图在正面显示，答案配图在翻面后显示。", "helper"),
     button("回到卡片审核", () => setView("review"), "btn quiet"));
