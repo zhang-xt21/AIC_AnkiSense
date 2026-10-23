@@ -28,10 +28,22 @@ function isInternal(url) {
   return url.startsWith("http://127.0.0.1:") || url.startsWith("http://localhost:");
 }
 
-function pythonExecutable() {
+function backendCommand() {
+  if (app.isPackaged) {
+    const name = process.platform === "win32" ? "ankisense-backend.exe" : "ankisense-backend";
+    return {
+      executable: path.join(process.resourcesPath, "backend", name),
+      args: ["--host", HOST, "--port", String(PORT)],
+      cwd: path.dirname(process.execPath),
+    };
+  }
   const scriptDir = process.platform === "win32" ? "Scripts" : "bin";
   const exe = process.platform === "win32" ? "python.exe" : "python";
-  return path.join(PROJECT_ROOT, ".venv", scriptDir, exe);
+  return {
+    executable: path.join(PROJECT_ROOT, ".venv", scriptDir, exe),
+    args: ["-m", "uvicorn", "ankisense.app:app", "--host", HOST, "--port", String(PORT)],
+    cwd: PROJECT_ROOT,
+  };
 }
 
 function backendIsUp() {
@@ -57,17 +69,24 @@ async function waitForBackend() {
 }
 
 function spawnBackend() {
-  const python = pythonExecutable();
-  if (!fs.existsSync(python)) {
-    throw new Error(`Backend not found at ${python}. Run .\\setup.ps1 in the project root first.`);
+  const { executable, args, cwd } = backendCommand();
+  if (!fs.existsSync(executable)) {
+    throw new Error(`Backend not found at ${executable}. Run .\\setup.ps1 in the project root first.`);
+  }
+  const env = { ...process.env };
+  if (app.isPackaged) {
+    // Installed app has no project ./data; point the backend at a writable,
+    // per-user data directory instead of the read-only install location.
+    env.ANKISENSE_DATA_DIR = path.join(app.getPath("userData"), "data");
   }
   backendProc = spawn(
-    python,
-    ["-m", "uvicorn", "ankisense.app:app", "--host", HOST, "--port", String(PORT)],
-    { cwd: PROJECT_ROOT, windowsHide: true, env: process.env }
+    executable,
+    args,
+    { cwd, windowsHide: true, env }
   );
   backendProc.stdout.on("data", (chunk) => process.stdout.write(`[backend] ${chunk}`));
   backendProc.stderr.on("data", (chunk) => process.stderr.write(`[backend] ${chunk}`));
+  backendProc.on("error", (error) => process.stderr.write(`[backend] ${error.message}\n`));
   backendProc.on("exit", () => {
     backendProc = null;
   });

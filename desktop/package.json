@@ -3,13 +3,47 @@
   "version": "0.1.0",
   "private": true,
   "description": "Electron thin shell for the AnkiSense web app",
+  "author": "AnkiSense Team",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "start:dev": "electron . --dev",
-    "start:packaged": "electron . --spawn-backend"
+    "start:packaged": "electron . --spawn-backend",
+    "dist": "electron-builder --win"
   },
   "devDependencies": {
-    "electron": "^44.6.0"
+    "electron": "^44.6.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.ankisense.desktop",
+    "productName": "AnkiSense",
+    "electronDist": "node_modules/electron/dist",
+    "files": [
+      "main.js",
+      "preload.js"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/ankisense-backend",
+        "to": "backend"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }

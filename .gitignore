@@ -16,6 +16,7 @@ __pycache__/
 node_modules/
 .local/
 dist/
+build/
 test_ppt/
 origin/Anki/
 origin/AnkiData/
