@@ -127,6 +127,18 @@
 .model-settings-feedback {
   margin-bottom: 20px;
 }
+.model-settings-test-note { margin: 14px 0; }
+.model-settings-test-result { margin: 14px 0 0; }
+.model-settings-test-result[data-connection="success"] {
+  color: #24644b;
+  background: #edf8f1;
+  border-color: #b7ddca;
+}
+.model-settings-test-result[data-connection="error"] {
+  color: #9c3434;
+  background: #fff2f2;
+  border-color: #edc5c5;
+}
 @media (max-width: 620px) {
   .model-settings-mode-options {
     grid-template-columns: 1fr;

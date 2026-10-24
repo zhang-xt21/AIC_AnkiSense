@@ -27,3 +27,42 @@ test("only the compatible, healthy AnkiSense API is ready", async () => {
     }
   } finally { http.get = original; }
 });
+
+test("the setup desktop rejects a legacy backend instead of silently reusing it", async () => {
+  const original = http.get;
+  let supportsSetup = false;
+  try {
+    http.get = (_options, callback) => {
+      const request = new EventEmitter(), response = new EventEmitter();
+      response.statusCode = 200; response.setEncoding = () => {};
+      queueMicrotask(() => { callback(response); response.emit("data", JSON.stringify({ application: "AnkiSense", api_version: 1, status: "ok", ...(supportsSetup ? { capabilities: { anki_setup: true } } : {}) })); response.emit("end"); });
+      return request;
+    };
+    assert.equal((await probeBackend({ requireAnkiSetup: true })).ready, false);
+    supportsSetup = true;
+    assert.equal((await probeBackend({ requireAnkiSetup: true })).ready, true);
+  } finally { http.get = original; }
+});
+
+test("connection verification requires an explicit capability even on a backend with Anki setup", async () => {
+  const original = http.get;
+  try {
+    for (const capability of [undefined, false, "true", true]) {
+      http.get = (_options, callback) => {
+        const request = new EventEmitter(), response = new EventEmitter();
+        response.statusCode = 200; response.setEncoding = () => {};
+        queueMicrotask(() => {
+          callback(response);
+          response.emit("data", JSON.stringify({ application: "AnkiSense", api_version: 1, status: "ok",
+            capabilities: { anki_setup: true, ai_connection_test: capability } }));
+          response.emit("end");
+        });
+        return request;
+      };
+      const result = await probeBackend({ requireAnkiSetup: true, requireConnectionTest: true });
+      assert.equal(result.ready, capability === true);
+      if (!result.ready) assert.match(result.reason, /退出旧版/);
+      assert.equal((await probeBackend({ requireAnkiSetup: true })).ready, true);
+    }
+  } finally { http.get = original; }
+});

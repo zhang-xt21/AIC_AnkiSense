@@ -20,6 +20,11 @@ datas = [
     (str(PROJECT / "ankisense" / "static"), "ankisense/static"),
     (str(PROJECT / "ankisense" / "workers"), "ankisense/workers"),
 ]
+# Package only distributable add-on files, never developer bytecode or local metadata.
+datas += [(str(PROJECT / "addons" / "ankisense_sync" / name), "addons/ankisense_sync") for name in (
+    "__init__.py", "ui.py", "onboarding.py", "answer_ui.py", "answer_journal.py", "client.py",
+    "transport.py", "collection_sync.py", "manifest.json", "config.json", "config.md", "bootstrap.apkg",
+)]
 binaries = []
 hiddenimports = collect_submodules("uvicorn")
 

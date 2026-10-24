@@ -4,7 +4,9 @@ import json
 import math
 import os
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -125,7 +127,7 @@ def model_request(request):
     if request.method != "POST":
         return False
     path = request.url.path
-    return (path in {"/api/card-drafts", "/api/generation-jobs"} or path in {"/api/attempts", "/api/plugin/v1/attempts"}
+    return (path in {"/api/card-drafts", "/api/generation-jobs", "/api/settings/ai/test"} or path in {"/api/attempts", "/api/plugin/v1/attempts"}
             or (path.startswith(("/api/attempts/", "/api/plugin/v1/attempts/")) and path.endswith("/retry"))
             or path == "/api/material-imports"
             or (path.startswith("/api/material-imports/") and path.endswith("/retry"))
@@ -139,9 +141,34 @@ def model_request(request):
 
 
 def install_model_settings(app, configuration):
+    # A result describes this process's last explicit test, never a live monitor.
+    app.state.model_connection = {"status": "unverified"}
+
     @app.get("/api/settings/ai")
     async def read_settings():
-        return public_settings(app.state.settings)
+        return {**public_settings(app.state.settings), "connection": app.state.model_connection}
+
+    @app.post("/api/settings/ai/test")
+    async def test_connection():
+        settings = app.state.settings
+        if settings.mode != "cloud" or not public_settings(settings)["configured"]:
+            raise HTTPException(422, "请先保存完整的自配 API 设置，再验证连接。")
+        if app.state.model_connection["status"] == "testing":
+            raise HTTPException(409, "连接验证正在进行，请等待结果。")
+        app.state.model_connection = {"status": "testing"}
+        started = perf_counter()
+        try:
+            # A separate adapter keeps the test's usage out of learning tasks.
+            await AIService(settings).verify_connection()
+            result = {"status": "success", "message": "连接验证成功，模型已返回有效的测试 JSON。"}
+        except AIError as error:
+            result = {"status": "error", "message": error.message, "code": error.code or "invalid_response"}
+        except Exception:
+            result = {"status": "error", "message": "连接验证未完成，请稍后重试。", "code": "unavailable"}
+        result.update(checked_at=datetime.now(timezone.utc).isoformat(),
+                      latency_ms=round((perf_counter() - started) * 1000))
+        app.state.model_connection = result
+        return result
 
     @app.put("/api/settings/ai")
     async def update_settings(request: Request):
@@ -179,4 +206,5 @@ def install_model_settings(app, configuration):
         app.state.image_checks.settings = updated
         app.state.image_auto_review.settings = updated
         app.state.card_auto_review.settings = updated
-        return public_settings(updated)
+        app.state.model_connection = {"status": "unverified"}
+        return {**public_settings(updated), "connection": app.state.model_connection}

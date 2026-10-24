@@ -16,6 +16,7 @@ from aqt.utils import showWarning
 from .client import PluginError
 from .collection_sync import SyncError, apply_bundle
 from .transport import check_connection, prepare_bundle
+from . import onboarding
 
 
 CLIENT_KEY = "ankisense_sync_client_id"
@@ -160,15 +161,8 @@ class SyncDialog(QDialog):
         self._refresh_controls()
 
     def _initial_path(self):
-        value = self.mw.pm.profile.get(PATH_KEY)
-        if isinstance(value, str):
-            return value
-        try:
-            config = self.mw.addonManager.getConfig(__name__) or {}
-            value = config.get("connection_file", "")
-            return value if isinstance(value, str) else ""
-        except Exception:
-            return ""
+        value = onboarding.connection_path(self.mw)
+        return value if isinstance(value, str) else ""
 
     def _load_decks(self):
         preferred = self.mw.pm.profile.get(DECK_KEY)
@@ -272,6 +266,7 @@ class SyncDialog(QDialog):
 
     def _remember(self, deck_id=None):
         self.mw.pm.profile[PATH_KEY] = self._active_path
+        self.mw.pm.profile[onboarding.SETUP_KEY] = onboarding.configuration(self.mw).get("setup_id")
         if deck_id is not None:
             self.mw.pm.profile[DECK_KEY] = deck_id
         try:
@@ -290,6 +285,7 @@ class SyncDialog(QDialog):
         if warning:
             lines.append(warning)
         self.details.setPlainText("\n".join(lines))
+        onboarding.background_event(self.mw, self._active_path, self._client_id)
 
     def _sync(self):
         target = self.deck_combo.currentData()
@@ -379,6 +375,10 @@ class SyncDialog(QDialog):
         self.deck_combo.addItem("请选择目标牌组…", None)
         self._load_decks()
         self._refresh_controls()
+        counts = {key: result[key] for key in ("added", "updated", "unchanged")}
+        counts.update(conflicts=len(conflicts), excluded=self._excluded)
+        onboarding.background_event(self.mw, self._active_path, self._client_id, "sync", counts,
+            on_failure=lambda: self.details.appendPlainText("卡片已同步；结果暂未回传 AnkiSense，可稍后重新检查连接。"))
 
     def _failed(self, error):
         if self._close_if_profile_changed():
@@ -446,6 +446,7 @@ def register(main_window):
     from .answer_ui import register as register_answer
 
     register_answer(main_window)
+    onboarding.register(main_window, _client_id)
     if getattr(main_window, "_ankisense_sync_action", None) is not None:
         return
     action = QAction(MENU_TEXT, main_window)

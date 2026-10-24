@@ -44,11 +44,19 @@ def main():
         status = check_connection(connection_path, client_id)
         assert status["cards"] == 2 and status["ai"]["mode"] == "demo"
         check("local_authenticated_connection", cards=status["cards"])
+        client.connection_event("heartbeat")
+        assert request("/api/anki/setup")["connected"] is True
+        check("wizard_requires_real_authenticated_heartbeat")
         bundle = prepare_bundle(connection_path, client_id)
         result = apply_bundle(collection, bundle, deck, state)
         assert result["added"] == 2 and not result["conflicts"], result
         assert collection.note_count() == 2
         check("first_sync_adds_two_approved_cards", **{key: result[key] for key in ("added", "updated", "unchanged")})
+        client.connection_event("sync", {**{key: result[key] for key in ("added", "updated", "unchanged")},
+                                         "conflicts": len(result["conflicts"]), "excluded": len(bundle.get("excluded", []))})
+        receipt = request("/api/anki/setup")["last_sync"]
+        assert receipt["added"] == 2 and receipt["conflicts"] == 0
+        check("wizard_shows_actual_sync_completion_counts")
         assert collection.models.get(1786831001) is not None
         check("stable_apkg_model_identity")
         assert not collection.find_notes("__ankisense-bootstrap-v1__")
@@ -62,6 +70,9 @@ def main():
         repeated = apply_bundle(collection, prepare_bundle(connection_path, client_id), deck, state)
         assert repeated["added"] == 0 and repeated["updated"] == 0 and repeated["unchanged"] == 2, repeated
         check("repeat_sync_does_not_duplicate")
+        client.connection_event("sync", {key: repeated[key] for key in ("added", "updated", "unchanged")})
+        assert request("/api/anki/setup")["last_sync"]["unchanged"] == 2
+        check("wizard_receipt_updates_after_repeat_sync")
         card = collection.get_card(first_ids["demo-stack"][0])
         card.queue, card.type, card.due, card.ivl, card.reps, card.lapses = 2, 2, 123, 42, 7, 1
         collection.update_card(card)

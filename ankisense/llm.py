@@ -627,7 +627,18 @@ text 给出可引用的全文，按原页文本行换行，不添加标题或解
             raise AIError("模型分析的要点或引用未通过校验，请重新分析。") from None
         return diagnosis
 
-    async def _request(self, instruction: str, data: dict, schema: dict, images: list[bytes] | None = None) -> dict:
+    async def verify_connection(self) -> None:
+        result = await self._request(
+            '这是连接测试。请只返回 JSON 对象 {"ok": true}。',
+            {"test": "AnkiSense connection check"},
+            {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+            max_tokens=64,
+        )
+        if result.get("ok") is not True:
+            raise AIError("模型已响应，但测试 JSON 内容不符合要求，请检查模型的 JSON 输出支持。", code="invalid_response")
+
+    async def _request(self, instruction: str, data: dict, schema: dict, images: list[bytes] | None = None,
+                       *, max_tokens: int = 4096) -> dict:
         self.last_usage = None
         settings = self.settings
         if settings.mode != "cloud":
@@ -661,7 +672,7 @@ text 给出可引用的全文，按原页文本行换行，不添加标题或解
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0.1,
-            "max_tokens": 4096,
+            "max_tokens": max_tokens,
         }
         payload.update(generation_options(settings.base_url, settings.model))
         if images:
@@ -687,6 +698,9 @@ text 给出可引用的全文，按原页文本行换行，不添加标题或解
             elif status == 429:
                 message = "模型服务额度不足或请求过于频繁，请检查额度后重试。"
                 code = "rate_limit"
+            elif status == 404:
+                message = "模型接口或模型不存在（404）。请核对 Base URL 和模型名称，勿填写聊天网页地址，也不要附加 /chat/completions。"
+                code = "configuration"
             elif 400 <= status < 500 or 300 <= status < 400:
                 message = "模型接口或请求配置不兼容，请检查接口地址、模型名称及图片输入支持。"
                 code = "configuration"

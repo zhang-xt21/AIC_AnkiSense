@@ -297,7 +297,8 @@ function render() {
     nav.classList.toggle("active", active);
     if (active) nav.setAttribute("aria-current", "page"); else nav.removeAttribute("aria-current");
   }
-  $("#mode-status").textContent = app.data.mode === "demo" ? "演示模式 · 本地规则反馈" : app.data.configured ? `云端模式 · ${app.data.model || "已配置模型"}` : "云端模式 · 待配置 API Key";
+  ModelSettings.renderStatus($("#mode-status"), app.data);
+  if ($("#app-version")) $("#app-version").textContent = app.data.app_version ? `v${app.data.app_version}` : "";
   const main = $("#main");
   const manualOpen = main.querySelector("#manual-tools")?.open;
   const oldGrid = main.querySelector(".workbench-grid");
@@ -319,7 +320,12 @@ function render() {
   scheduleReviewPoll();
 }
 function renderModelSettings() {
-  return app.settingsPanel ||= ModelSettings.create({ api, jsonOptions, onSaved: async () => { await refresh(); } });
+  return app.settingsPanel ||= ModelSettings.create({ api, jsonOptions, onSaved: async () => { await refresh(); },
+    onConnection: connection => {
+      app.data.model_connection = connection;
+      ModelSettings.renderStatus($("#mode-status"), app.data);
+    }
+  });
 }
 
 function renderMaterials() {
@@ -1238,6 +1244,7 @@ function renderExport() {
     text("p", "如果之前用 TSV 导入过相同卡片，首次改用 APKG 可能出现两份笔记；两种格式的已有笔记不会自动合并。", "helper"),
     text("p", "卡片上的「用自己的话回答」会打开本机 AnkiSense，需要网页服务正在运行；在其他设备上不能直接使用这个本机链接。", "helper"),
     alternativeFormats);
+  if (typeof AnkiSetup !== "undefined") page.append(AnkiSetup.create({ api, jsonOptions }));
   page.append(el("div", { class: "export-grid" }, panel("导出已批准卡片", "草稿与已拒绝卡片不会导出", download), panel("导入 Anki，只需两步", "下载牌组包，再在 Anki 中打开", instructions)));
   return page;
 }

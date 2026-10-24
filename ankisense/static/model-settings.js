@@ -15,7 +15,19 @@
     return result;
   }
 
-  function create({ api, jsonOptions, onSaved } = {}) {
+  function renderStatus(target, settings) {
+    const connection = settings.model_connection || {};
+    const state = settings.mode === "demo" ? "demo" : !settings.configured ? "unverified" : connection.status || "unverified";
+    const label = { unverified: "未验证", testing: "验证中…", success: "验证通过", error: "验证失败" }[state] || "未验证";
+    target.dataset.connection = state;
+    target.textContent = settings.mode === "demo" ? "演示模式 · 本地规则反馈"
+      : settings.configured ? `云端模式 · ${settings.model || "已配置模型"} · ${label}` : "云端模式 · 待补全配置";
+    target.title = settings.mode === "demo" ? "使用本地规则，无需连接模型。"
+      : connection.checked_at ? `上次验证：${new Date(connection.checked_at).toLocaleString()}。${connection.message || ""} 验证结果不代表持续在线。`
+        : "请在模型设置中验证连接；保存配置不会发起模型请求。";
+  }
+
+  function create({ api, jsonOptions, onSaved, onConnection } = {}) {
     if (typeof api !== "function" || typeof jsonOptions !== "function") {
       throw new TypeError("ModelSettings.create requires api and jsonOptions.");
     }
@@ -128,15 +140,62 @@
     const storageNote = node("p", "helper model-settings-storage", "配置与密钥保存在本机配置文件中，不写入浏览器存储，读取设置时不会返回密钥。请妥善保管本机配置文件。保存只更新设置，不会请求模型或验证连通性。");
     const save = node("button", "btn", "保存设置");
     save.type = "submit";
+    const test = node("button", "btn secondary", "验证连接");
+    test.type = "button";
+    const testHint = node("span", "helper");
+    const testNote = node("p", "helper model-settings-test-note", "验证会向已保存的服务商发送一次固定的简短测试文本，消耗少量 API 额度；不会发送讲义、卡片或回答。仅检查文字请求与 JSON 输出，图片能力需另行确认。");
+    const connectionResult = node("div", "notice model-settings-test-result");
+    connectionResult.setAttribute("role", "status");
+    connectionResult.setAttribute("aria-live", "polite");
+    let savedSettings = null;
+    let connectionState = { status: "unverified" };
+    let connectionPoll;
     const actions = node("div", "model-settings-actions");
-    actions.append(save, node("span", "helper", "保存后用于后续生成与分析。"));
-    controls.append(modeGroup, modeHint, connection, advanced, storageNote, actions);
+    actions.append(save, test, testHint);
+    controls.append(modeGroup, modeHint, connection, advanced, storageNote, actions, testNote, connectionResult);
     form.append(controls);
     body.append(loading, error, retry, feedback, form);
     panel.append(header, body);
     let busy = false;
     let keyConfigured = false;
 
+    function isDirty() {
+      return !savedSettings || savedSettings.mode !== (modes.cloud.checked ? "cloud" : "demo")
+        || savedSettings.base_url !== baseUrl.value.trim() || savedSettings.model !== model.value.trim()
+        || savedSettings.timeout_seconds !== Number(timeout.value) || Boolean(key.value.trim()) || clearKey.checked;
+    }
+    function updateTestAvailability() {
+      const dirty = isDirty();
+      test.disabled = busy || dirty || savedSettings?.mode !== "cloud" || !savedSettings?.configured || connectionState.status === "testing";
+      testHint.textContent = dirty ? "修改后请先保存，再验证连接。"
+        : savedSettings?.mode !== "cloud" ? "演示模式无需验证连接。"
+          : !savedSettings?.configured ? "请先补全并保存 API 地址、模型和密钥。" : "验证已保存的模型配置。";
+    }
+    function showConnection(value, followPending = false) {
+      clearTimeout(connectionPoll);
+      connectionState = value || { status: "unverified" };
+      connectionResult.dataset.connection = connectionState.status;
+      connectionResult.textContent = connectionState.status === "testing" ? "正在验证连接，请等待模型响应…"
+        : connectionState.status === "success" ? `${connectionState.message} 耗时 ${(connectionState.latency_ms / 1000).toFixed(1)} 秒。仅代表本次测试通过。`
+          : connectionState.status === "error" ? `验证失败：${connectionState.message}`
+            : savedSettings?.mode === "demo" ? "演示模式使用本地规则，无需验证连接。" : "当前配置尚未验证连接。";
+      if (connectionState.checked_at) connectionResult.textContent += ` 上次验证：${new Date(connectionState.checked_at).toLocaleString()}。`;
+      updateTestAvailability();
+      if (typeof onConnection === "function") onConnection(connectionState);
+      // Returning to settings during a test only reads its status; it never
+      // starts another model request or replaces an unsaved form draft.
+      if (followPending && connectionState.status === "testing") {
+        connectionPoll = setTimeout(async () => {
+          if (!panel.isConnected) return;
+          try {
+            const latest = await api(endpoint);
+            if (panel.isConnected) showConnection(latest.connection, true);
+          } catch {
+            if (panel.isConnected) showConnection({ status: "error", message: "无法读取验证结果，请刷新页面查看。" });
+          }
+        }, 1000);
+      }
+    }
     function updateModeHint() {
       modeHint.textContent = modes.cloud.checked
         ? "云端模式会向你配置的服务商发送相关原文与回答；主动检查配图时，还会发送所选图片及原页。"
@@ -157,6 +216,7 @@
       panel.setAttribute("aria-busy", String(value));
       retry.disabled = value;
       updateKeyState();
+      updateTestAvailability();
     }
     function applySettings(settings) {
       modes.cloud.checked = settings.mode === "cloud";
@@ -167,10 +227,12 @@
       key.value = "";
       keyConfigured = settings.api_key_configured === true;
       clearKey.checked = false;
+      savedSettings = settings;
       badge.textContent = settings.mode === "cloud" ? settings.configured ? "云端已配置" : "待补全配置" : "演示模式";
-      badge.className = `pill${settings.mode === "cloud" && !settings.configured ? " amber" : " green"}`;
+      badge.className = `pill${settings.mode === "cloud" ? " amber" : " green"}`;
       updateModeHint();
       updateKeyState();
+      showConnection(settings.connection, true);
     }
     async function load() {
       if (busy) return;
@@ -195,11 +257,29 @@
     form.addEventListener("input", () => {
       feedback.hidden = true;
       error.textContent = "";
+      updateTestAvailability();
     });
     for (const radio of Object.values(modes)) radio.addEventListener("change", updateModeHint);
     clearKey.addEventListener("change", () => {
       if (clearKey.checked) key.value = "";
       updateKeyState();
+      updateTestAvailability();
+    });
+    test.addEventListener("click", async () => {
+      if (test.disabled || busy || isDirty()) return;
+      setBusy(true);
+      test.textContent = "正在验证…";
+      error.textContent = "";
+      feedback.hidden = true;
+      showConnection({ status: "testing" });
+      try {
+        showConnection(await api(`${endpoint}/test`, jsonOptions("POST", {})));
+      } catch (failure) {
+        showConnection({ status: "error", message: failure.message || "连接验证未完成，请重试。" });
+      } finally {
+        setBusy(false);
+        test.textContent = "验证连接";
+      }
     });
     form.addEventListener("submit", async event => {
       event.preventDefault();
@@ -249,5 +329,5 @@
     return panel;
   }
 
-  return Object.freeze({ create });
+  return Object.freeze({ create, renderStatus });
 });

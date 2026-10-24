@@ -12,6 +12,11 @@ contextBridge.exposeInMainWorld("ankisenseDesktop", {
   minimize: () => ipcRenderer.send("window:minimize"),
   maximize: () => ipcRenderer.send("window:maximize"),
   close: () => ipcRenderer.send("window:close"),
+  ankiSetup: async (action) => {
+    const response = await ipcRenderer.invoke("anki:setup", action);
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  },
   onMaximizeChange: (callback) => {
     ipcRenderer.on("window:maximize-change", (_event, maximized) => callback(maximized));
   },

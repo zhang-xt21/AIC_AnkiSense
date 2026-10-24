@@ -170,6 +170,15 @@ class PluginClient:
     def attempt(self, attempt_id):
         return self._request("/attempts/" + _identifier(attempt_id))
 
+    def connection_event(self, kind, result=None, *, plugin_version="0.2.0"):
+        if kind not in {"heartbeat", "sync"}:
+            raise ValueError("Invalid connection event")
+        result = result or {}
+        counts = {key: result.get(key, 0) for key in ("added", "updated", "unchanged", "conflicts", "excluded")}
+        if any(type(value) is not int or value < 0 or value > 10000 for value in counts.values()):
+            raise ValueError("Invalid sync counts")
+        return self._request("/events", body={"kind": kind, "plugin_version": plugin_version, **counts})
+
     def retry_attempt(self, attempt_id, expected_retry_count, *, allow_cloud=False):
         if type(allow_cloud) is not bool or type(expected_retry_count) is not int or not 0 <= expected_retry_count <= 2:
             raise ValueError("Use the latest retry count and a boolean cloud confirmation")

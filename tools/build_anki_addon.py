@@ -14,7 +14,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "addons" / "ankisense_sync"
 PACKAGE = "ankisense_sync"
-FILES = ["__init__.py", "ui.py", "answer_ui.py", "answer_journal.py", "client.py", "transport.py", "collection_sync.py",
+FILES = ["__init__.py", "ui.py", "onboarding.py", "answer_ui.py", "answer_journal.py", "client.py", "transport.py", "collection_sync.py",
          "manifest.json", "config.json", "config.md", "bootstrap.apkg"]
 
 

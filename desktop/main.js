@@ -4,6 +4,7 @@ const { spawn } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
 const { probeBackend } = require("./backend-health.cjs");
+const { createAnkiIntegration } = require("./anki-integration.cjs");
 const HOST = "127.0.0.1";
 const requestedPort = Number(process.env.ANKISENSE_DESKTOP_PORT || 8765);
 const PORT = Number.isInteger(requestedPort) && requestedPort > 0 && requestedPort <= 65535 ? requestedPort : 8765;
@@ -11,6 +12,7 @@ const BASE_URL = `http://${HOST}:${PORT}`;
 const READY_TIMEOUT_MS = 60_000;
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 let backendProc = null, backendFailure = "", backendLog = "", mainWindow = null, quitting = false;
+let ankiIntegration;
 if (process.env.ANKISENSE_DESKTOP_USER_DATA) app.setPath("userData", path.resolve(process.env.ANKISENSE_DESKTOP_USER_DATA));
 function isInternal(value) {
   try { return new URL(value).origin === BASE_URL; } catch { return false; }
@@ -43,7 +45,7 @@ async function waitForBackend() {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (backendFailure) throw new Error(backendFailure);
-    const result = await probeBackend({ host: HOST, port: PORT });
+    const result = await probeBackend({ host: HOST, port: PORT, requireAnkiSetup: true, requireConnectionTest: true });
     if (result.ready) return;
     if (result.responding) throw new Error(result.reason);
     await new Promise(resolve => setTimeout(resolve, 250));
@@ -82,12 +84,20 @@ function windowFor(event) { return BrowserWindow.fromWebContents(event.sender); 
 ipcMain.on("window:minimize", event => windowFor(event)?.minimize());
 ipcMain.on("window:maximize", event => { const win = windowFor(event); if (win) win.isMaximized() ? win.unmaximize() : win.maximize(); });
 ipcMain.on("window:close", event => windowFor(event)?.close());
+ipcMain.handle("anki:setup", async (event, action) => {
+  if (event.sender !== mainWindow?.webContents || !isInternal(event.sender.getURL()) || !ankiIntegration
+      || !["detect", "chooseProgram", "chooseData", "install", "launch", "revealConnection", "downloadAnki"].includes(action)) return { ok: false, error: "此操作仅能从 AnkiSense 连接向导发起。" };
+  try { return { ok: true, result: await ankiIntegration[action]() }; }
+  catch (error) { return { ok: false, error: error.message || "Anki 连接操作未完成。" }; }
+});
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on("second-instance", (_event, argv) => { if (argv.includes("--hidden")) return; if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); } });
   app.whenReady().then(async () => {
+    ankiIntegration = createAnkiIntegration({ userData: app.getPath("userData"), projectRoot: PROJECT_ROOT,
+      backendUrl: BASE_URL, dialog, shell, getWindow: () => mainWindow });
     Menu.setApplicationMenu(null);
-    const result = await probeBackend({ host: HOST, port: PORT });
+    const result = await probeBackend({ host: HOST, port: PORT, requireAnkiSetup: true, requireConnectionTest: true });
     if (result.responding && !result.ready) throw new Error(`${result.reason}。请释放端口 ${PORT} 后重试。`);
     if (process.argv.includes("--spawn-backend") && result.responding) throw new Error(`端口 ${PORT} 已有 AnkiSense 运行。请关闭旧服务或使用默认启动方式。`);
     if (!result.ready) {

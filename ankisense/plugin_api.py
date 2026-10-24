@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import time
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -108,7 +109,8 @@ class PluginConnection:
             raise error(401, "unauthorized", "插件连接凭据无效，请重新连接本机 AnkiSense。")
         if not client_id or not re.fullmatch(CLIENT_PATTERN, client_id):
             raise error(400, "invalid_client", "插件需要提供固定的本地配置标识 X-AnkiSense-Client。")
-        return {"client_id": client_id, "server_id": value["server_id"], "base_url": value["base_url"]}
+        return {"client_id": client_id, "server_id": value["server_id"], "base_url": value["base_url"],
+                "connection_id": hashlib.sha256(value["token"].encode()).hexdigest()}
 
 
 class PluginAttempt(BaseModel):
@@ -126,6 +128,17 @@ class PluginRetry(BaseModel):
     allow_cloud: bool = Field(default=False, strict=True)
 
 
+class ConnectionEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: str = Field(pattern=r"^(heartbeat|sync)$")
+    plugin_version: str = Field(min_length=1, max_length=40, pattern=r"^[0-9A-Za-z_.-]+$")
+    added: int = Field(default=0, ge=0, le=500, strict=True)
+    updated: int = Field(default=0, ge=0, le=500, strict=True)
+    unchanged: int = Field(default=0, ge=0, le=500, strict=True)
+    conflicts: int = Field(default=0, ge=0, le=10000, strict=True)
+    excluded: int = Field(default=0, ge=0, le=10000, strict=True)
+
+
 class PluginAPI:
     def __init__(self, store, storage, settings, attempts):
         self.store, self.settings, self.attempts = store, settings, attempts
@@ -133,6 +146,20 @@ class PluginAPI:
         self.sync = PluginSync(store, storage)
         self.router = APIRouter(prefix=PREFIX, tags=["Anki plugin v1"])
         authorize = self.connection.authorize
+
+        @self.router.post("/events")
+        def event(body: ConnectionEvent, identity=Depends(authorize)):
+            def save():
+                previous = self.store.get("anki_clients", identity["client_id"]) or {}
+                record = {"id": identity["client_id"], "connection_id": identity["connection_id"],
+                          "plugin_version": body.plugin_version, "last_seen": time.time()}
+                if previous.get("connection_id") == identity["connection_id"] and previous.get("last_sync"):
+                    record["last_sync"] = previous["last_sync"]
+                if body.kind == "sync":
+                    record["last_sync"] = {"at": time.time(), **{key: getattr(body, key) for key in ("added", "updated", "unchanged", "conflicts", "excluded")}}
+                return [("anki_clients", record)]
+            self.store.mutate(save)
+            return {"received": True}
 
         @self.router.get("/status")
         def status(identity=Depends(authorize)):

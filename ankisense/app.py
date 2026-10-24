@@ -21,6 +21,7 @@ from .auto_cards import AutoCardService
 from .automatic_import import AutomaticImportService
 from .source_calibration import SourceCalibrationService
 from .plugin_api import PluginAPI, install_plugin_error_handlers
+from .anki_setup import AnkiSetupService
 from .figure_recommendations import RecommendationService
 from .figure_vision import FigureVisionService
 from .image_auto_review import ImageAutoReviewService
@@ -33,12 +34,13 @@ from .ingest import parse_pdf_document, text_blocks
 from .ocr import recognize_page, render_page_png
 from .media import EXPORT_COLUMNS, MAX_UPLOAD_BYTES, media_zip, normalize_image, require_media, save_media
 from .llm import AIError, AIService, Settings
-from .model_settings import ModelSettingsFile, install_model_settings, model_request
+from .model_settings import ModelSettingsFile, install_model_settings, model_request, public_settings
 from .paths import resolve_data_dir
 from .schemas import AttemptRequest, CardDraft, CardUpdate, GenerateRequest, SourceBlock, TextDocumentRequest, SourceCorrectionRequest, SourceRevisionRequest, SourcePageImageRequest
 from .sources import page_id, page_records, require_current_source, save_page_revision
 from .source_proofread import SourceProofreadService
 from .source_quality import with_quality
+from .version import APP_VERSION
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "ankisense" / "static"
@@ -90,7 +92,7 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
             await source_proofread.shutdown()
             await recommendations.shutdown()
 
-    app = FastAPI(title="AnkiSense", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="AnkiSense", version=APP_VERSION, lifespan=lifespan)
     app.state.store = store
     app.state.ai = ai_service or AIService(settings)
     app.state.settings = settings
@@ -119,6 +121,8 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
     app.include_router(card_auto_review.router)
     app.include_router(source_proofread.router)
     app.include_router(app.state.plugin.router)
+    app.state.anki_setup = AnkiSetupService(store, storage, app.state.plugin.connection)
+    app.include_router(app.state.anki_setup.router)
     install_plugin_error_handlers(app)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "testserver"])
     locks: dict[str, asyncio.Lock] = {}
@@ -189,13 +193,14 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
     @app.get("/health")
     def health():
         return {"application": "AnkiSense", "api_version": 1,
-                "status": "ok", "mode": app.state.settings.mode}
+                "status": "ok", "mode": app.state.settings.mode,
+                "app_version": APP_VERSION, "capabilities": {"anki_setup": True, "ai_connection_test": True}}
 
     @app.get("/api/state")
     def state():
         settings = app.state.settings
         cards = [display_card(store, card) for card in store.all("cards")]
-        return {"mode": settings.mode, "model": settings.model if settings.mode == "cloud" else "内置演示规则", "configured": settings.mode == "demo" or bool(settings.api_key and settings.model and settings.base_url), "image_check": image_checks.status(), "generation_jobs": generation_jobs.list_jobs(), **{name: store.all(name) for name in ("documents", "blocks", "attempts", "source_proposals", "media")}, "cards": cards, "source_pages": [with_quality(page) for page in store.all("source_pages")]}
+        return {"app_version": APP_VERSION, "mode": settings.mode, "model": settings.model if settings.mode == "cloud" else "内置演示规则", "configured": public_settings(settings)["configured"], "model_connection": app.state.model_connection, "image_check": image_checks.status(), "generation_jobs": generation_jobs.list_jobs(), **{name: store.all(name) for name in ("documents", "blocks", "attempts", "source_proposals", "media")}, "cards": cards, "source_pages": [with_quality(page) for page in store.all("source_pages")]}
 
     @app.post("/api/demo")
     def demo():

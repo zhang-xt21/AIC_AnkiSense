@@ -218,6 +218,9 @@ host = Host()
 aqt.mw = host
 from addons.ankisense_sync import ui
 
+receipts = []
+ui.onboarding.send_event = lambda path, client_id, kind="heartbeat", result=None: receipts.append((kind, result))
+
 checks = {}
 screenshots = []
 release = Event()
@@ -255,6 +258,21 @@ try:
     checks["real_queryop_updates_qt_on_success"] = True
     assert host.pm.profile[ui.PATH_KEY] == str(test_root / "plugin-connection.json")
     checks["connection_path_saved_without_credential_display"] = True
+    wait_until(lambda: any(kind == "heartbeat" for kind, _ in receipts), "Connection receipt not emitted")
+    checks["native_connection_callback_emits_heartbeat"] = True
+    auto_path = test_root / "wizard-connection.json"
+    auto_path.write_text("{}", encoding="utf-8")
+    config = {"setup_id": "wizard-instance", "connection_file": str(auto_path)}
+    host.addonManager.getConfig = lambda _: config
+    assert ui.onboarding.connection_path(host) == str(auto_path)
+    checks["new_desktop_pairing_overrides_old_profile_path_once"] = True
+    count_before = len(receipts)
+    host._ankisense_presence_timer.timeout.emit()
+    wait_until(lambda: len(receipts) > count_before, "Automatic heartbeat did not use background task")
+    checks["paired_plugin_sends_automatic_background_heartbeat"] = True
+    host.pm.profile[ui.onboarding.SETUP_KEY] = config["setup_id"]
+    assert ui.onboarding.connection_path(host) == str(test_root / "plugin-connection.json")
+    host.addonManager.getConfig = lambda _: {}
 
     ui.prepare_bundle = lambda path, client_id: {"cards": [{"id": "ui-fixture"}], "excluded": ["draft"]}
     apply_calls = []
@@ -278,6 +296,10 @@ try:
     assert host.undo_refreshes == 1 and hook_calls and host.background_ops == 0 and host.progress.levels == 0
     checks["real_collectionop_writes_only_isolated_note"] = True
     checks["operation_hooks_and_undo_refresh"] = True
+    wait_until(lambda: any(kind == "sync" for kind, _ in receipts), "Sync receipt not emitted")
+    counts = next(value for kind, value in receipts if kind == "sync")
+    assert counts == {"added": 1, "updated": 0, "unchanged": 0, "conflicts": 0, "excluded": 1}
+    checks["native_sync_receipt_reports_only_completed_write"] = True
     assert "暂不可同步" in dialog.details.toPlainText()
     filename = test_root / "sync-dialog-completed.png"
     assert dialog.grab().save(str(filename))

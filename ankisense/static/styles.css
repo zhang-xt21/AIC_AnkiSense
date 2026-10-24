@@ -421,6 +421,24 @@ svg {
   background: #617f9a;
   content: "";
 }
+.mode-badge[data-connection="success"] {
+  color: #24644b;
+  border-color: #b7ddca;
+  background: #edf8f1;
+}
+.mode-badge[data-connection="success"]::before { background: #278257; }
+.mode-badge[data-connection="error"] {
+  color: #9c3434;
+  border-color: #edc5c5;
+  background: #fff2f2;
+}
+.mode-badge[data-connection="error"]::before { background: #c74343; }
+.mode-badge[data-connection="testing"] {
+  color: #815e1e;
+  border-color: #e9d397;
+  background: #fff8e6;
+}
+.mode-badge[data-connection="testing"]::before { background: #b88320; }
 main {
   max-width: 1500px;
   min-height: calc(100vh - 117px);
@@ -2841,6 +2859,14 @@ main {
 .automatic-import-failure { flex-basis: 100%; }
 .automatic-import-actions { flex-basis: 100%; }
 .automatic-import-actions .helper { max-width: 70ch; }
+.anki-setup { margin: 20px 0 28px; }
+.anki-setup > summary { padding: 20px; cursor: pointer; font-weight: 700; }
+.anki-setup-step { margin: 16px 0; padding: 18px; border: 1px solid var(--line); border-radius: 12px; }
+.anki-setup-step h3 { margin: 0 0 10px; }
+.anki-setup-step .btn { margin: 8px 8px 8px 0; }
+.anki-setup-step p { overflow-wrap: anywhere; }
+.anki-setup-step details { margin-top: 12px; }
+.anki-setup-step[data-connected="true"] { background: #f1faf4; }
 .automatic-card .auto-illustration { font-size: 12px; }
 
 .studio-ai-batch-status { margin: 14px 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }

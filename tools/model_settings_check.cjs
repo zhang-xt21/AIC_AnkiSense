@@ -20,6 +20,7 @@ fs.mkdirSync(runDir, { recursive: true });
 fs.writeFileSync(path.join(output, "server.py"), `"""Offline fixture; never reads .env or permits model/network client calls."""
 import os
 import sys
+import asyncio
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parents[1]
@@ -29,9 +30,15 @@ if not DATA.is_relative_to(HERE):
     raise RuntimeError("Fixture data must remain inside its isolated folder")
 os.environ["ANKISENSE_DATA_DIR"] = str(DATA)
 os.environ.update(AI_MODE="demo", AI_API_KEY="", AI_BASE_URL="", AI_MODEL="")
-from ankisense.llm import AIService, Settings
+from ankisense.llm import AIError, AIService, Settings
 Settings.from_env = classmethod(lambda cls: cls(mode="demo"))
-COUNTS = {"model_calls": 0, "http_calls": 0}
+COUNTS = {"model_calls": 0, "http_calls": 0, "test_calls": 0}
+async def test_connection(self):
+    COUNTS["test_calls"] += 1
+    await asyncio.sleep(1)
+    if COUNTS["test_calls"] == 2:
+        raise AIError("模型服务拒绝访问，请检查 API Key 和模型权限。", code="authentication")
+AIService.verify_connection = test_connection
 async def deny_model(*args, **kwargs):
     COUNTS["model_calls"] += 1
     raise RuntimeError("Model calls are forbidden in this fixture")
@@ -228,7 +235,7 @@ async function assertNoKeyReadback() {
     assert.equal(saved.api_key_configured, false);
     assert.equal(saved.configured, false);
     assert.equal(saved.base_url, "https://other-model.test/v1");
-    await page.waitForFunction(() => document.querySelector("#mode-status")?.textContent.includes("待配置"));
+    await page.waitForFunction(() => document.querySelector("#mode-status")?.textContent.includes("待补全配置"));
     assert.match(await page.locator(".model-settings-feedback").innerText(), /尚未填完整/);
     assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, "model-settings.json"), "utf8")).api_key, "");
     await assertNoKeyReadback();
@@ -315,6 +322,41 @@ async function assertNoKeyReadback() {
     await setting("timeout_seconds").fill("75");
     await save();
   });
+  await check("Explicit verification shows pending, success and failure colors and allows retry", async () => {
+    const verify = () => page.getByRole("button", { name: "验证连接", exact: true });
+    const badge = page.locator("#mode-status");
+    assert.equal(await badge.getAttribute("data-connection"), "unverified");
+    assert.equal(await verify().isEnabled(), true);
+    await verify().click();
+    assert.equal(await page.getByRole("button", { name: "正在验证…", exact: true }).isDisabled(), true);
+    assert.equal(await badge.getAttribute("data-connection"), "testing");
+    assert.equal(await saveButton().isDisabled(), true);
+    await page.locator('[data-view="materials"]').click();
+    await openSettings();
+    await page.waitForFunction(() => document.querySelector("#mode-status")?.dataset.connection === "success");
+    await page.waitForFunction(() => document.querySelector(".model-settings-test-result")?.dataset.connection === "success");
+    assert.equal(await verify().isEnabled(), true, "Returning during verification must not leave the new panel stuck in testing");
+    assert.match(await page.locator(".model-settings-test-result").innerText(), /连接验证成功.*耗时/);
+    assert.equal(await badge.evaluate(el => getComputedStyle(el, "::before").backgroundColor), "rgb(39, 130, 87)");
+    await screenshot("05-connection-success");
+    await page.reload();
+    await openSettings();
+    assert.equal(await badge.getAttribute("data-connection"), "success", "Reload reuses last explicit result without sending another test");
+    assert.equal((await api("/__test/metrics")).test_calls, 1);
+    await verify().click();
+    await page.waitForFunction(() => document.querySelector("#mode-status")?.dataset.connection === "error");
+    assert.match(await page.locator(".model-settings-test-result").innerText(), /API Key/);
+    assert.equal(await badge.evaluate(el => getComputedStyle(el, "::before").backgroundColor), "rgb(199, 67, 67)");
+    await screenshot("06-connection-error");
+    await verify().click();
+    await page.waitForFunction(() => document.querySelector("#mode-status")?.dataset.connection === "success");
+    await setting("model").fill("changed-model-requires-saving");
+    assert.equal(await verify().isDisabled(), true);
+    assert.match(await page.locator(".model-settings-actions .helper").innerText(), /先保存/);
+    await save();
+    assert.equal(await badge.getAttribute("data-connection"), "unverified");
+    assert.equal(await verify().isEnabled(), true);
+  });
   await check("Desktop, tablet and phone widths have no horizontal overflow", async () => {
     for (const width of [1440, 1024, 736, 390, 320]) {
       await page.setViewportSize({ width, height: 1100 });
@@ -325,11 +367,11 @@ async function assertNoKeyReadback() {
     }
   });
   await check("No model calls, external requests, secret readbacks or browser exceptions", async () => {
-    assert.deepEqual(await api("/__test/metrics"), { model_calls: 0, http_calls: 0 });
+    assert.deepEqual(await api("/__test/metrics"), { model_calls: 0, http_calls: 0, test_calls: 3 });
     assert.deepEqual(blockedRequests, []);
     assert.deepEqual(responseLeaks, []);
     assert.deepEqual(errors, []);
-    assert.deepEqual(requests.filter(request => request.method === "POST"), []);
+    assert.deepEqual(requests.filter(request => request.method === "POST").map(request => request.path), Array(3).fill("/api/settings/ai/test"));
     const unexpected = consoleErrors.filter(message => !/422|409|net::ERR_FAILED/.test(message));
     assert.deepEqual(unexpected, []);
     await assertNoKeyReadback();

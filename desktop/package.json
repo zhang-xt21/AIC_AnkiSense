@@ -1,6 +1,6 @@
 {
   "name": "ankisense-desktop",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "private": true,
   "description": "Electron thin shell for the AnkiSense web app",
   "author": "AnkiSense Team",
@@ -12,9 +12,10 @@
     "dist": "npm run build:backend && electron-builder --win",
     "build:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File build-backend.ps1",
     "pack": "npm run build:backend && electron-builder --win --dir",
-    "test": "node --test health.test.cjs",
+    "test": "node --test health.test.cjs anki-integration.test.cjs",
     "test:native": "node smoke.cjs",
-    "test:frozen": "node smoke.cjs --frozen-backend"
+    "test:frozen": "node smoke.cjs --frozen-backend",
+    "test:connection": "node connection-smoke.cjs"
   },
   "devDependencies": {
     "electron": "^44.6.0",
@@ -27,7 +28,8 @@
     "files": [
       "main.js",
       "preload.js",
-      "backend-health.cjs"
+      "backend-health.cjs",
+      "anki-integration.cjs"
     ],
     "extraResources": [
       {

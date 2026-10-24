@@ -21,5 +21,6 @@ def test_health_identifies_the_local_service_without_secrets(tmp_path, monkeypat
         assert response.json() == {
             "application": "AnkiSense", "api_version": 1,
             "status": "ok", "mode": mode,
+            "app_version": "0.1.3", "capabilities": {"anki_setup": True, "ai_connection_test": True},
         }
         assert "PRIVATE-MODEL-KEY" not in response.text
