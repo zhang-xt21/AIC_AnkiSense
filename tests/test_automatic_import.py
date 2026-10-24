@@ -124,7 +124,7 @@ def test_failed_batch_retries_then_continues_without_manual_confirmation(client)
         return await original(*args)
     ai.extract_knowledge_visual = fail_first_batch
     result = wait_import(client, upload(client, lecture_pdf(7)))
-    assert result["status"] == "completed", result
+    assert result["status"] == "partial" and result["retryable"], result
     assert result["job"]["progress"]["completed"] == 3
     assert len(result["job"]["card_ids"]) == 4
     assert any(i["code"] == "batch_failed" and i["pages"] == [1, 2, 3] for i in result["job"]["issues"])
@@ -158,20 +158,26 @@ def test_pptx_upload_uses_native_text_and_starts_pipeline(client, monkeypatch):
     assert data["documents"][0]["filename"] == "lecture.pptx"
 
 
-def test_finished_checkpoints_resume_on_service_restart(client):
+def test_finished_checkpoints_wait_for_explicit_resume_on_service_restart(client):
     result = wait_import(client, upload(client))
     store = client.app.state.store
     job = store.get("auto_card_jobs", result["job_id"])
     saved_ids = job["card_ids"][:]
+    calls = client.app.state.ai.generation_calls
     job.update(status="pending", stage="quality")
     store.put("auto_card_jobs", job)
     async def recover():
         client.app.state.auto_cards.recover()
     client.portal.call(recover)
     result = wait_import(client, result)
+    assert result["status"] == "interrupted" and result["retryable"]
+    assert client.app.state.ai.generation_calls == calls
+    assert client.post(f"/api/material-imports/{result['id']}/retry").status_code == 200
+    result = wait_import(client, result)
     assert result["status"] == "completed"
     assert result["job"]["card_ids"] == saved_ids
     assert len(client.get("/api/state").json()["cards"]) == 2
+    assert client.app.state.ai.generation_calls == calls
 
 
 def test_pptx_native_text_follows_slide_relationship_order(tmp_path):

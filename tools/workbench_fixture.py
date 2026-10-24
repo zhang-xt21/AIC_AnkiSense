@@ -114,4 +114,4 @@ app = create_app(data_dir=DATA, settings=Settings(mode="demo"))
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8976, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("ANKISENSE_UI_PORT", "8976")), log_level="warning")

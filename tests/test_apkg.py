@@ -155,8 +155,9 @@ def test_apkg_has_an_aggregate_limit(client, monkeypatch):
     assert response.status_code == 413
 
 
+@pytest.mark.parametrize("endpoint", ["/api/export", "/api/export/media", "/api/export/apkg"])
 @pytest.mark.parametrize("state", ["needs_review", "old_revision", "source_outdated"])
-def test_export_refuses_unreviewed_or_stale_evidence_even_if_card_is_approved(client, state):
+def test_export_refuses_unreviewed_or_stale_evidence_even_if_card_is_approved(client, state, endpoint):
     from ankisense.sources import page_id
     card = change(client, seed(client)[0], status="approved")
     store = client.app.state.store
@@ -168,7 +169,28 @@ def test_export_refuses_unreviewed_or_stale_evidence_even_if_card_is_approved(cl
         store.put("source_pages", {"id": page_id(card["document_id"], block["page"]),
                   "status": "needs_review" if state == "needs_review" else "reviewed",
                   "block_ids": [block_id] if state == "needs_review" else ["other-current-block"]})
-    assert client.get("/api/export/apkg").status_code == 409
+    response = client.get(endpoint)
+    assert response.status_code == 409, response.text
+    assert "原文" in response.json()["detail"] or "校对" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("endpoint", ["/api/export", "/api/export/media", "/api/export/apkg"])
+@pytest.mark.parametrize("failure", ["missing_block", "changed_text"])
+def test_export_refuses_invalid_evidence_instead_of_leaking_other_approved_cards(client, endpoint, failure):
+    cards = seed(client)
+    change(client, cards[0], status="approved")
+    stale = change(client, cards[1], status="approved")
+    block_id = stale["evidence"][0]["block_id"]
+    store = client.app.state.store
+    if failure == "missing_block":
+        with store.connect() as connection:
+            connection.execute("DELETE FROM records WHERE collection='blocks' AND id=?", (block_id,))
+    else:
+        block = store.get("blocks", block_id)
+        store.put("blocks", {**block, "text": "引用原文已不在此片段。"})
+    response = client.get(endpoint)
+    assert response.status_code == 409, response.text
+    assert "原文" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("url", ["javascript:alert(1)", "http://remote.example/?card=demo", "http://localhost@evil.example/?card=demo", "http://localhost/?card=other", "http://localhost/?card=demo&next=evil", 'http://localhost/?card=demo" onclick="evil()', "http://localhost:99999/?card=demo"])
@@ -222,4 +244,36 @@ def test_export_keeps_a_consistent_snapshot_when_card_is_edited(client, tmp_path
         response = result.result(timeout=10)
     _, notes, *_ = inspect_package(response, tmp_path)
     assert notes[0][2][1] == card["question"]
+    assert client.app.state.store.get("cards", card["id"])["status"] == "draft"
+
+
+@pytest.mark.parametrize("endpoint", ["/api/export", "/api/export/media"])
+def test_text_exports_use_one_snapshot_when_approval_changes_during_export(client, monkeypatch, endpoint):
+    module = importlib.import_module("ankisense.app")
+    card = change(client, seed(client)[0], status="approved")
+    original = module.require_exportable
+    entered, release = Event(), Event()
+
+    def delayed(selected, reader):
+        entered.set()
+        assert release.wait(10)
+        return original(selected, reader)
+
+    monkeypatch.setattr(module, "require_exportable", delayed)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        result = pool.submit(client.get, endpoint)
+        try:
+            assert entered.wait(10)
+            change(client, card, status="draft", question="后来修改的题目")
+        finally:
+            release.set()
+        response = result.result(timeout=10)
+    assert response.status_code == 200, response.text if endpoint == "/api/export" else ""
+    if endpoint == "/api/export/media":
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            exported = archive.read("ankisense-approved.tsv").decode("utf-8")
+    else:
+        exported = response.text
+    assert card["question"] in exported
+    assert "后来修改的题目" not in exported
     assert client.app.state.store.get("cards", card["id"])["status"] == "draft"

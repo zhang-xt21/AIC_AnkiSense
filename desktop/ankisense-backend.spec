@@ -10,7 +10,7 @@ into the installer's resources via the "extraResources" entry in package.json.
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
 PROJECT = Path(SPECPATH).resolve().parent  # repo root (spec lives in desktop/)
 
@@ -18,9 +18,10 @@ datas = [
     # app.py resolves STATIC as <frozen root>/ankisense/static, so keep that
     # relative layout in the bundle (no backend source change needed).
     (str(PROJECT / "ankisense" / "static"), "ankisense/static"),
+    (str(PROJECT / "ankisense" / "workers"), "ankisense/workers"),
 ]
 binaries = []
-hiddenimports = []
+hiddenimports = collect_submodules("uvicorn")
 
 # rapidocr ships its ONNX models + config yaml next to its own package (located
 # via __file__), and onnxruntime ships native DLLs. collect_all grabs code,
@@ -30,6 +31,10 @@ for package in ("rapidocr", "onnxruntime"):
     datas += d
     binaries += b
     hiddenimports += h
+
+# OCR reports package versions via importlib.metadata even in a frozen build.
+for package in ("rapidocr", "onnxruntime", "pypdfium2", "pillow"):
+    datas += copy_metadata(package)
 
 a = Analysis(
     ["backend_launcher.py"],

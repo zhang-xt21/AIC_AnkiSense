@@ -276,6 +276,36 @@ def test_page_copy_is_immutable_and_checks_imported_page_revision_and_ownership(
     assert page_media(client, text_document, page).status_code == 404
 
 
+@pytest.mark.parametrize("endpoint", ["/api/export", "/api/export/media", "/api/export/apkg"])
+@pytest.mark.parametrize("media_state", ["old_revision", "wrong_document", "missing_record"])
+def test_all_exports_refuse_an_approved_card_with_stale_page_picture(client, endpoint, media_state):
+    document, page = imported_pdf(client)
+    reviewed = client.put(f"/api/documents/{document['id']}/pages/{page['page']}", json={
+        "revision": page["revision"], "text": page["text"]})
+    assert reviewed.status_code == 200, reviewed.text
+    page = reviewed.json()
+    media = page_media(client, document, page).json()
+    block = client.app.state.store.get("blocks", page["block_ids"][0])
+    original = seed(client)[0]
+    card = {**original, "id": "pdf-picture-export", "document_id": document["id"],
+            "evidence": [{"block_id": block["block_id"], "quote": "Stacks use LIFO."}]}
+    store = client.app.state.store
+    store.put("cards", card)
+    approved = update(client, card, images=[{"media_id": media["id"]}], status="approved")
+    assert approved.status_code == 200, approved.text
+    if media_state == "missing_record":
+        with store.connect() as connection:
+            connection.execute("DELETE FROM records WHERE collection='media' AND id=?", (media["id"],))
+    else:
+        source = {**media["source"],
+                  "revision": 0 if media_state == "old_revision" else media["source"]["revision"],
+                  "document_id": "other-document" if media_state == "wrong_document" else document["id"]}
+        store.put("media", {**media, "source": source})
+    response = client.get(endpoint)
+    assert response.status_code == 409, response.text
+    assert "配图" in response.json()["detail"]
+
+
 def test_source_changed_during_page_copy_discards_uncommitted_image(client, monkeypatch):
     module = importlib.import_module("ankisense.app")
     document, page = imported_pdf(client)

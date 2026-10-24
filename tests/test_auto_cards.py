@@ -173,7 +173,9 @@ def test_confirmation_then_continue_preserves_previous_batches(client):
     job = wait_job(client, job)
     assert job["status"] == "completed", job
     assert len(cards(client)) == 1
-    assert cards(client)[0]["evidence"][0]["block_id"].endswith("-r2")
+    assert cards(client)[0]["evidence"][0]["block_id"].endswith("-r1")
+    assert client.post(f"/api/auto-card-jobs/{job['id']}/retry", json={}).status_code == 409
+    assert len(cards(client)) == 1
 
 
 def test_source_change_during_model_call_discards_current_batch(client):
@@ -318,7 +320,8 @@ def test_recovery_does_not_erase_completed_results(client):
     record["status"] = "running"
     client.app.state.store.put("auto_card_jobs", record)
     client.app.state.auto_cards.recover()
-    assert client.get(f"/api/auto-card-jobs/{job['id']}").json()["status"] == "failed"
+    recovered = client.get(f"/api/auto-card-jobs/{job['id']}").json()
+    assert recovered["status"] == "interrupted" and recovered["retryable"]
     assert len(cards(client)) == 1
 
 

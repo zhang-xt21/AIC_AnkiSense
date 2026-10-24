@@ -194,7 +194,7 @@ def test_empty_points_do_not_force_cards_or_reuse_old_usage(monkeypatch, blocks)
 
 def test_review_clear_requires_full_rubric_support(monkeypatch, blocks, card, report):
     service, calls = cloud(monkeypatch, report.model_dump())
-    assert run(service.review_card(card, blocks)) == report
+    assert run(service.review_knowledge_card(card, blocks)) == report
     assert len(calls) == 1
 
 
@@ -211,7 +211,7 @@ def test_real_quote_can_still_require_review_for_wrong_answer(monkeypatch, block
         assert "引用确实存在不等于答案正确" in payload["messages"][0]["content"]
 
     service, _ = cloud(monkeypatch, result, inspect)
-    checked = run(service.review_card(card, blocks))
+    checked = run(service.review_knowledge_card(card, blocks))
     assert checked.verdict == "needs_review"
     assert checked.issues[0].code == "unsupported_answer"
 
@@ -241,7 +241,7 @@ def test_review_rejects_inconsistent_reports(monkeypatch, blocks, card, report, 
             issue["code"] = "arbitrary"
     service, calls = cloud(monkeypatch, result)
     with pytest.raises(AIError, match="校验"):
-        run(service.review_card(card, blocks))
+        run(service.review_knowledge_card(card, blocks))
     assert len(calls) == 1
 
 
@@ -299,7 +299,7 @@ def test_new_stages_are_explicitly_cloud_only(blocks, points, card, report, meth
     calls = {
         "extract": lambda: service.extract_knowledge(blocks),
         "generate": lambda: service.generate_knowledge_cards(blocks, points),
-        "review": lambda: service.review_card(card, blocks),
+        "review": lambda: service.review_knowledge_card(card, blocks),
         "repair": lambda: service.repair_card(card, blocks, report),
     }
     with pytest.raises(AIError, match="云端"):

@@ -49,6 +49,12 @@ def validate_quality_report(
         raise ValueError("质量检查引用了未知或重复的评分要点编号。")
     for issue in report.issues:
         validate_evidence(issue.evidence, blocks)
+    if report.review_checks is not None:
+        from .llm import CardReviewResult, validate_card_review
+        review = CardReviewResult.model_validate(report.review_checks)
+        validate_card_review(review, card, list(blocks))
+        if report.verdict == "clear" and review.decision != "pass":
+            raise ValueError("原页通过结论必须同时满足整卡题目范围与逐项证据校验。")
     if report.verdict == "clear":
         if report.issues or supported != point_ids:
             raise ValueError("无疑点结论必须确认所有评分要点得到原文支持。")

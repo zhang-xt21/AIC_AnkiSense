@@ -9,7 +9,12 @@
     "start": "electron .",
     "start:dev": "electron . --dev",
     "start:packaged": "electron . --spawn-backend",
-    "dist": "electron-builder --win"
+    "dist": "npm run build:backend && electron-builder --win",
+    "build:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File build-backend.ps1",
+    "pack": "npm run build:backend && electron-builder --win --dir",
+    "test": "node --test health.test.cjs",
+    "test:native": "node smoke.cjs",
+    "test:frozen": "node smoke.cjs --frozen-backend"
   },
   "devDependencies": {
     "electron": "^44.6.0",
@@ -21,7 +26,8 @@
     "electronDist": "node_modules/electron/dist",
     "files": [
       "main.js",
-      "preload.js"
+      "preload.js",
+      "backend-health.cjs"
     ],
     "extraResources": [
       {

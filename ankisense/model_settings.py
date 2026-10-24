@@ -120,13 +120,22 @@ class ModelSettingsFile:
 
 
 def model_request(request):
+    if request.method == "PUT" and request.url.path.startswith("/api/cards/"):
+        return True  # Saving a draft now enqueues automatic model review.
     if request.method != "POST":
         return False
     path = request.url.path
-    return (path == "/api/card-drafts" or path in {"/api/attempts", "/api/plugin/v1/attempts"}
+    return (path in {"/api/card-drafts", "/api/generation-jobs"} or path in {"/api/attempts", "/api/plugin/v1/attempts"}
             or (path.startswith(("/api/attempts/", "/api/plugin/v1/attempts/")) and path.endswith("/retry"))
-            or (path.startswith("/api/cards/") and path.endswith(("/image-recommendations/check", "/auto-quality-check")))
-            or (path.startswith("/api/documents/") and path.endswith("/calibration")))
+            or path == "/api/material-imports"
+            or (path.startswith("/api/material-imports/") and path.endswith("/retry"))
+            or (path.startswith("/api/documents/") and path.endswith(("/ai-proofread", "/calibration", "/auto-card-jobs")))
+            or (path.startswith("/api/auto-card-jobs/") and path.endswith("/retry"))
+            or (path.startswith("/api/cards/") and path.endswith("/image-recommendations/check"))
+            or (path.startswith("/api/cards/") and path.endswith("/auto-quality-check"))
+            or (path.startswith("/api/cards/") and path.endswith("/auto-check"))
+            or (path.startswith("/api/cards/") and path.endswith("/auto-illustration"))
+            or (path.startswith("/api/cards/") and path.endswith("/auto-review")))
 
 
 def install_model_settings(app, configuration):
@@ -152,7 +161,10 @@ def install_model_settings(app, configuration):
         except ValueError as error:
             # These validation messages contain fixed text, never submitted values.
             raise HTTPException(422, str(error)) from None
-        if (app.state.active_model_requests or app.state.image_checks.running
+        if (app.state.active_model_requests or app.state.source_proofread.running
+                or app.state.image_checks.running or app.state.image_auto_review.running
+                or app.state.card_auto_review.running or app.state.generation_jobs.running
+                or app.state.automatic_illustrations.running
                 or any(item.get("status") in {"pending", "running"} for item in app.state.store.all("auto_card_jobs"))
                 or any(item.get("status") in {"pending", "running"} for item in app.state.store.all("material_imports"))
                 or any(item.get("status") == "pending" for item in app.state.store.all("attempts"))):
@@ -165,4 +177,6 @@ def install_model_settings(app, configuration):
         app.state.attempts.settings = updated
         app.state.plugin.settings = updated
         app.state.image_checks.settings = updated
+        app.state.image_auto_review.settings = updated
+        app.state.card_auto_review.settings = updated
         return public_settings(updated)

@@ -3,7 +3,7 @@ import asyncio
 import hashlib
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from .auto_cards import ACTIVE, AutoCardRequest, now
 from .ingest import parse_pdf_document
@@ -18,17 +18,23 @@ class AutomaticImportService:
         self.store, self.storage, self.cards = store, storage, cards
         self.tasks = {}
         self.queue = asyncio.Lock()
+        self.lock = asyncio.Lock()
         self.router = APIRouter()
         self.router.add_api_route("/api/material-imports", self.start, methods=["POST"])
         self.router.add_api_route("/api/material-imports", self.list, methods=["GET"])
         self.router.add_api_route("/api/material-imports/{identifier}", self.get, methods=["GET"])
+        self.router.add_api_route("/api/material-imports/{identifier}/retry", self.retry, methods=["POST"])
 
     def public(self, record):
-        result = {k: record.get(k) for k in ("id", "filename", "status", "message", "progress", "document_id", "job_id", "error", "created_at", "updated_at")}
+        result = {k: record.get(k) for k in ("id", "filename", "status", "message", "progress", "document_id", "job_id", "error", "created_at", "updated_at", "options", "attempt")}
         if record.get("job_id"):
             result["job"] = self.cards.get(record["job_id"])
             result["status"] = result["job"]["status"]
             result["message"] = result["job"]["message"]
+            result["error"] = result["job"].get("error")
+            result["progress"] = result["job"].get("progress")
+            result["plan"] = result["job"].get("plan")
+        result["retryable"] = (result.get("job") or {}).get("retryable", result["status"] in {"partial", "failed", "cancelled", "awaiting_confirmation", "interrupted"})
         return result
 
     def list(self):
@@ -46,7 +52,8 @@ class AutomaticImportService:
             return [("material_imports", {**record, **values, "updated_at": now()})]
         self.store.mutate(build)
 
-    async def start(self, file: UploadFile = File(...)):
+    async def start(self, file: UploadFile = File(...), count: int | None = Form(default=None, ge=1, le=600),
+                    auto_images: bool = Form(default=True)):
         self.cards._configuration()
         filename = (file.filename or "lecture.pdf").replace("\\", "/").split("/")[-1][:150]
         extension = Path(filename).suffix.lower()
@@ -60,6 +67,10 @@ class AutomaticImportService:
         if not content or (extension == ".pdf" and not content.startswith(b"%PDF-")) or (extension == ".pptx" and not content.startswith(b"PK")) or (extension == ".ppt" and not content.startswith(bytes.fromhex("d0cf11e0a1b11e1"))):
             raise HTTPException(422, "文件内容与格式不符，请选择有效的讲义。")
         identifier = "import-" + hashlib.sha256(content + extension.encode()).hexdigest()[:24]
+        async with self.lock:
+            return self._start_uploaded(identifier, filename, extension, content, count, auto_images)
+
+    def _start_uploaded(self, identifier, filename, extension, content, count, auto_images):
         existing = self.store.get("material_imports", identifier)
         if existing:
             return self.public(existing)
@@ -69,12 +80,35 @@ class AutomaticImportService:
         path.write_bytes(content)
         record = {"id": identifier, "filename": filename, "extension": extension, "status": "pending",
                   "message": "讲义已接收，正在自动处理。", "document_id": None, "job_id": None,
-                  "created_at": now(), "updated_at": now(), "error": None}
+                  "created_at": now(), "updated_at": now(), "error": None, "attempt": 1,
+                  "options": {"count": count, "auto_images": auto_images}}
         self.store.put("material_imports", record)
         self.launch(identifier)
         return self.public(record)
 
+    async def retry(self, identifier: str):
+        """Retry explicitly from saved upload bytes; repeated clicks are idempotent."""
+        async with self.lock:
+            self.cards._configuration()
+            record = self.store.get("material_imports", identifier)
+            if not record:
+                raise HTTPException(404, "导入任务不存在。")
+            current = self.public(record)
+            if current["status"] in ACTIVE or identifier in self.tasks:
+                return current
+            if not current["retryable"]:
+                raise HTTPException(409, "此导入无需重试；来源变化后请重新导入材料。")
+            if record.get("job_id"):
+                await self.cards.retry(record["job_id"])
+            else:
+                self.update(identifier, status="pending", error=None,
+                            attempt=record.get("attempt", 1) + 1, message="正在重试已上传的讲义。")
+                self.launch(identifier)
+            return self.public(self.store.get("material_imports", identifier))
+
     def launch(self, identifier):
+        if identifier in self.tasks and not self.tasks[identifier].done():
+            return
         task = asyncio.create_task(self.run(identifier))
         self.tasks[identifier] = task
         task.add_done_callback(lambda completed: self.tasks.pop(identifier, None) if self.tasks.get(identifier) is completed else None)
@@ -113,7 +147,8 @@ class AutomaticImportService:
                 document = {"id": doc_id, "title": Path(record["filename"]).stem, "filename": record["filename"],
                             "page_count": result["total"], "file_url": f"/api/documents/{doc_id}/file",
                             "is_demo": False, "created_at": now(), "automatic_import": True,
-                            "warning": "系统自动对照原页检查卡牌；原文逐页校对是可选操作。", "extraction_mode": "auto"}
+                            "warning": "系统自动对照原页检查卡牌；原文逐页校对是可选操作。", "extraction_mode": "auto",
+                            "pdf_sha256": hashlib.sha256(content).hexdigest()}
                 records = [("documents", document)]
                 for index, page in enumerate(result["pages"]):
                     if native and len(native) == result["total"] and native[index].strip():
@@ -124,7 +159,9 @@ class AutomaticImportService:
                 while any(j["status"] in ACTIVE for j in self.store.all("auto_card_jobs")):
                     self.update(identifier, message="讲义已就绪，正在等待前一份材料处理完成。")
                     await asyncio.sleep(1)
-                job = await self.cards.start(doc_id, AutoCardRequest(max_cards=600, image_mode="source_page", autonomous=True))
+                options = record.get("options") or {}
+                job = await self.cards.start(doc_id, AutoCardRequest(max_cards=600,
+                    count=options.get("count"), image_mode="source_page" if options.get("auto_images", True) else "off", autonomous=True))
                 self.update(identifier, job_id=job["id"], status="completed", message="已开始自动制卡。")
             except asyncio.CancelledError:
                 self.update(identifier, status="pending", message="服务恢复后会自动继续。")

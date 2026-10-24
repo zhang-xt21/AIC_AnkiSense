@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -42,11 +43,14 @@ class AutoCardRequest(StrictModel):
     image_mode: Literal["off", "recommend", "checked", "source_page"] = "recommend"
     source_mode: Literal["manual", "visual"] = "manual"
     autonomous: bool = False
+    count: int | None = Field(default=None, ge=1, le=600, strict=True)
 
     @model_validator(mode="after")
     def manual_limit(self):
         if not self.autonomous and self.max_cards > 60:
             raise ValueError("手动批次最多 60 张；整份讲义请使用自动导入。")
+        if self.count is not None and self.count > self.max_cards:
+            raise ValueError("目标数量不能超过本次卡片上限。")
         return self
 
 
@@ -57,9 +61,10 @@ class QualityCheckRequest(StrictModel):
 def batch_blocks(blocks):
     """Keep page/paragraph order and stay below the existing model input limits."""
     batches, batch, size = [], [], 0
-    for block in blocks:
-        if len(block.text) > 16000:
-            raise HTTPException(422, "单个原文片段过长，请先拆分材料。")
+    windows = [block.model_copy(update={"text": block.text[start:start + 9000]})
+               for block in blocks for start in range(0, len(block.text), 9000)
+               if block.text[start:start + 9000].strip()]
+    for block in windows:
         if batch and (len(batch) == 3 or size + len(block.text) > 9000):
             batches.append(batch)
             batch, size = [], 0
@@ -68,6 +73,37 @@ def batch_blocks(blocks):
     if batch:
         batches.append(batch)
     return batches
+
+
+def automatic_plan(blocks, count=None, max_cards=600):
+    """Plan the visual workflow locally without reducing its material limits."""
+    groups = batch_blocks(blocks)
+    selected = list(range(len(groups)))
+    if count is not None and count < len(groups):
+        selected = ([len(groups) // 2] if count == 1 else
+                    [round(index * (len(groups) - 1) / (count - 1)) for index in range(count)])
+    chars = sum(len(block.text) for block in blocks)
+    covered = sum(len(block.text) for index in selected for block in groups[index])
+    quotas = {index: None for index in selected}
+    if count is not None and selected:
+        quotas = {index: 1 for index in selected}
+        for _ in range(count - len(selected)):
+            choices = [index for index in selected if quotas[index] < 6]
+            if not choices:
+                break
+            index = min(choices, key=lambda key: quotas[key])
+            quotas[index] += 1
+    selected_pages = sorted({block.page for index in selected for block in groups[index]})
+    return {"recommended_count": min(max_cards, max(len(groups), math.ceil(chars / 700))),
+            "target_count": count, "max_count": max_cards, "total_batches": len(selected),
+            "coverage_ratio": round(covered / chars, 4) if chars else 0,
+            "partial_scope": covered < chars,
+            "selected_pages": selected_pages,
+            "omitted_pages": sorted({block.page for block in blocks} - set(selected_pages)),
+            "suggestion_reason": "按有效文字与分批覆盖估计；不代表知识点总数，证据不足或重复的候选不会为凑数保留。",
+            "batches": [{"index": index + 1, "count": quotas[index],
+                         "block_ids": [block.block_id for block in groups[index]],
+                         "pages": sorted({block.page for block in groups[index]})} for index in selected]}
 
 
 def context_blocks(blocks, focus):
@@ -99,15 +135,10 @@ class AutoCardService:
 
     def recover(self):
         for job in self.store.all("auto_card_jobs"):
-            if job["status"] in ACTIVE:
-                try:
-                    same_config = job.get("config") == self._configuration()
-                except HTTPException:
-                    same_config = False
-                if job.get("options", {}).get("autonomous") and same_config:
-                    self._launch(job["id"])
-                    continue
-                job.update(status="failed", error="服务重启中断了任务；已完成的卡片保留，可继续处理。", message="任务中断，可重试。", updated_at=now())
+            if job["status"] in ACTIVE and job["id"] not in self.tasks:
+                job.update(status="interrupted", retryable=True,
+                           error="服务重启中断了任务；已保存的卡片和进度保留。",
+                           message="任务已中断，点击继续后仅处理未完成内容。", updated_at=now())
                 self.store.put("auto_card_jobs", job)
 
     async def shutdown(self):
@@ -127,8 +158,16 @@ class AutoCardService:
     def _public(job):
         keys = ("id", "document_id", "status", "stage", "progress", "card_ids", "issues",
                 "message", "error", "created_at", "updated_at", "options", "skipped_count",
-                "knowledge_count", "calibration", "pipeline_version", "prompt_version")
-        return {key: job.get(key) for key in keys}
+                "knowledge_count", "calibration", "pipeline_version", "prompt_version", "plan",
+                "rejected_cards", "rejected_count")
+        result = {key: job.get(key) for key in keys}
+        legacy_partial = (job.get("options", {}).get("autonomous") and job["status"] == "completed"
+                          and any(not batch.get("status") for batch in job.get("batches", []))
+                          and any(issue.get("code") in {"batch_failed", "card_failed"} for issue in job.get("issues", [])))
+        if legacy_partial:
+            result["status"] = "partial"
+        result["retryable"] = job.get("retryable", result["status"] in {"partial", "failed", "cancelled", "awaiting_confirmation", "interrupted"})
+        return result
 
     def list(self, document_id: str):
         if not self.store.get("documents", document_id):
@@ -152,7 +191,8 @@ class AutoCardService:
         require_current_reviewed(self.store, blocks)
         card = CardDraft.model_validate({key: original[key] for key in CardDraft.model_fields})
         try:
-            report = await self.ai().review_card(card, blocks)
+            ai = self.ai()
+            report = await (getattr(ai, "review_knowledge_card", None) or ai.review_card)(card, blocks)
             validate_quality_report(report, card, blocks)
             others = [c for c in self.store.all("cards") if c["id"] != card_id and c["document_id"] == original["document_id"] and not c.get("source_outdated") and c["status"] != "rejected"]
             duplicates = rule_issues(card, blocks, others)
@@ -183,13 +223,15 @@ class AutoCardService:
                   if block["document_id"] == document_id and (ids is None or block["block_id"] in ids)]
         blocks.sort(key=lambda b: (b.page, int(b.block_id.split("-b")[-1].split("-r")[0]) if "-b" in b.block_id and b.block_id.split("-b")[-1].split("-r")[0].isdigit() else 0, b.block_id))
         reviewed_pages = {p["page"] for p in pages if source_usable(p)}
-        eligible = [b for b in blocks if autonomous or not pages or b.page in reviewed_pages]
+        extracted_pages = {page["page"] for page in pages if page.get("text", "").strip()
+                           and (page.get("status") in {"pending", "reviewed"} or source_usable(page))}
+        eligible = [b for b in blocks if not pages or b.page in (extracted_pages if autonomous else reviewed_pages)]
         calibration = [{"page": p["page"], "revision": p["revision"], **analyze_page(p)} for p in pages]
         issues = [issue for report in calibration if report["status"] != "ready" for issue in report["issues"]]
         for report in calibration:
             if report["status"] != "ready" and not report["issues"]:
                 issues.append({"code": "source_unconfirmed", "severity": "warning", "page": report["page"], "reason": "本页原文尚未确认，请检查自动校准结果并保存校对。", "suggestion": "确认本页后继续任务。"})
-        manifest = [[p["page"], p["revision"], source_usable(p) or (p["status"] == "empty" and bool(p.get("reviewed_at"))), p["block_ids"]] for p in pages]
+        manifest = [[p["page"], p["revision"], bool(p.get("text", "").strip()) and p["status"] not in {"failed", "empty"}, p["block_ids"]] for p in pages]
         return document, eligible, calibration, issues, digest([manifest, [b.model_dump() for b in blocks]])
 
     def _configuration(self):
@@ -197,6 +239,21 @@ class AutoCardService:
         if settings.mode != "cloud" or not all((settings.api_key, settings.model, settings.base_url)):
             raise HTTPException(422, "自动制卡需要先在模型设置中配置云端模型。")
         return {"model": settings.model, "endpoint_hash": digest(settings.base_url), "prompt_version": AUTO_CARD_PROMPT_VERSION}
+
+    def _matches_signature(self, job, signature):
+        if job.get("source_signature", signature) == signature:
+            return True
+        # Older signatures included confirmation metadata. Verify the entire old
+        # manifest before upgrading; source changes still invalidate recovery.
+        if not any(not batch.get("batch_id") for batch in job.get("batches", [])):
+            return False
+        _, blocks, _, _, _ = self._capture(job["document_id"], True)
+        pages = sorted((page for page in self.store.all("source_pages")
+                        if page["document_id"] == job["document_id"]), key=lambda page: page["page"])
+        manifest = [[page["page"], page["revision"], source_usable(page)
+                     or (page["status"] == "empty" and bool(page.get("reviewed_at"))), page["block_ids"]]
+                    for page in pages]
+        return job.get("source_signature") == digest([manifest, [block.model_dump() for block in blocks]])
 
     async def start(self, document_id: str, body: AutoCardRequest):
         async with self.lock:
@@ -221,6 +278,8 @@ class AutoCardService:
                    "knowledge_count": 0, "message": "正在准备原文与自动校准结果。", "error": None,
                    "pipeline_version": PIPELINE_VERSION, "prompt_version": AUTO_CARD_PROMPT_VERSION,
                    "created_at": now(), "updated_at": now()}
+            job["plan"] = automatic_plan(blocks, body.count, body.max_cards)
+            job.update(rejected_cards=[], rejected_count=0)
             self.store.put("auto_card_jobs", job)
             self._launch(job["id"])
             return self._public(job)
@@ -238,10 +297,15 @@ class AutoCardService:
             job = self._job(job_id)
             if job["status"] in ACTIVE:
                 return self._public(job)
-            if job["status"] not in {"failed", "cancelled", "awaiting_confirmation"}:
+            if not self._public(job)["retryable"]:
                 raise HTTPException(409, "此任务无需重试；来源变化后请创建新任务。")
             if self._configuration() != job["config"]:
                 raise HTTPException(409, "模型或提示版本已变化，请创建新任务。")
+            if job.get("options", {}).get("autonomous"):
+                signature = self._capture(job["document_id"], True)[-1]
+                if not self._matches_signature(job, signature):
+                    raise HTTPException(409, "讲义来源已变化，请创建新任务。")
+                job["source_signature"] = signature
             if any(item["status"] in ACTIVE for item in self.store.all("auto_card_jobs")) or job_id in self.tasks:
                 raise HTTPException(409, "前一个任务仍在结束，请稍后重试。")
             # Completed batches must still refer to the same eligible sources.
@@ -251,6 +315,7 @@ class AutoCardService:
                     raise HTTPException(409, "已完成批次的来源失效，请创建新任务。")
                 if not job["options"].get("autonomous"):
                     require_current_reviewed(self.store, [SourceBlock.model_validate(b) for b in sources])
+            job.pop("retryable", None)
             job.update(status="pending", error=None, message="继续处理未完成的批次。", updated_at=now())
             self.store.put("auto_card_jobs", job)
             self._launch(job_id)
@@ -342,7 +407,7 @@ class AutoCardService:
                         self._update(job_id, stage="quality", message="正在独立核对答案、评分点和引用。")
                         card = item.card
                         validate_card(card, batch)
-                        report = await ai.review_card(card, batch)
+                        report = await (getattr(ai, "review_knowledge_card", None) or ai.review_card)(card, batch)
                         validate_quality_report(report, card, batch)
                         self._check(job_id, batch, signature)
                         repairs, previous = 0, None
@@ -351,7 +416,7 @@ class AutoCardService:
                                 repaired = await ai.repair_card(card, batch, report)
                                 self._check(job_id, batch, signature)
                                 validate_card(repaired, batch)
-                                checked = await ai.review_card(repaired, batch)
+                                checked = await (getattr(ai, "review_knowledge_card", None) or ai.review_card)(repaired, batch)
                                 validate_quality_report(checked, repaired, batch)
                                 self._check(job_id, batch, signature)
                                 repairs = 1

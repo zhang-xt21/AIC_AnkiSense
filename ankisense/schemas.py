@@ -1,7 +1,7 @@
 import math
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -36,6 +36,43 @@ class CardDraft(StrictModel):
 
 class DraftBatch(StrictModel):
     cards: list[CardDraft] = Field(min_length=1, max_length=6)
+
+
+class ImageIntent(StrictModel):
+    need: Literal["none", "helpful", "required"] = "none"
+    reason: str = Field(default="", max_length=300)
+    block_ids: list[str] = Field(default_factory=list, max_length=8)
+
+
+class PlannedCardDraft(CardDraft):
+    # Kept separate from CardDraft so older card editors and exports retain
+    # their existing contract. Generation predicts a need, never an image URL.
+    image_intent: ImageIntent = Field(default_factory=ImageIntent)
+
+    @model_validator(mode="after")
+    def cited_image_sources(self):
+        intent = self.image_intent
+        cited = {item.block_id for item in self.evidence}
+        if (len(set(intent.block_ids)) != len(intent.block_ids)
+                or not set(intent.block_ids) <= cited
+                or (intent.need != "none" and (not intent.block_ids or not intent.reason))):
+            raise ValueError("配图用途必须说明理由，且只能指向本卡明确引用的原文片段。")
+        return self
+
+
+class PlannedDraftBatch(StrictModel):
+    cards: list[PlannedCardDraft] = Field(min_length=0, max_length=6)
+
+
+class VerifiedImageContext(StrictModel):
+    side: Literal["question", "answer"]
+    page: int = Field(ge=1)
+    description: str = Field(max_length=1800)
+
+
+class CardReviewInput(CardDraft):
+    # Only constructed server-side from current, successful visual receipts.
+    verified_images: list[VerifiedImageContext] = Field(default_factory=list, max_length=4)
 
 
 class Diagnosis(StrictModel):

@@ -253,6 +253,84 @@ def test_cloud_generation_checks_count_and_evidence(monkeypatch, card, blocks):
         asyncio.run(service.generate_drafts(blocks, 1))
 
 
+@pytest.mark.parametrize("actual", [0, 1])
+def test_planned_generation_accepts_fewer_cards_and_sends_previous_questions(monkeypatch, card, blocks, actual):
+    sent = []
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return completion_response({"cards": [card.model_dump()] * actual})
+    service = cloud_service(monkeypatch, handler)
+    result = asyncio.run(service.generate_drafts(blocks, 3, allow_fewer=True,
+                                                 avoid_questions=["栈的顶部叫什么？"]))
+    assert len(result.cards) == actual
+    assert len(sent) == 1
+    data = json.loads(sent[0]["messages"][1]["content"])
+    assert data["count"] == 3 and data["avoid_questions"] == ["栈的顶部叫什么？"]
+    assert "不要凑数" in sent[0]["messages"][0]["content"]
+    assert "必须严格遵循指定的卡片数量" not in sent[0]["messages"][0]["content"]
+
+
+def test_planned_generation_rejects_extra_cards_and_isolates_invalid_evidence(monkeypatch, card, blocks):
+    service = cloud_service(monkeypatch, lambda request: completion_response({"cards": [card.model_dump()] * 2}))
+    with pytest.raises(AIError, match="校验"):
+        asyncio.run(service.generate_drafts(blocks, 1, allow_fewer=True))
+    card.evidence[0].quote = "不存在于原文的内容"
+    result = asyncio.run(service.generate_drafts(blocks, 2, allow_fewer=True))
+    assert result.cards == [] and len(result.rejected_cards) == 2
+    assert [item["index"] for item in result.rejected_cards] == [1, 2]
+    assert "连续原文" in result.rejected_cards[0]["reason"]
+
+
+@pytest.mark.parametrize("need", ["helpful", "required"])
+def test_planned_generation_classifies_picture_need_in_same_request(monkeypatch, card, blocks, need):
+    sent = []
+    intent = {"need": need, "reason": "讲义图示有助理解操作过程", "block_ids": [card.evidence[0].block_id]}
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return completion_response({"cards": [{**card.model_dump(), "image_intent": intent}]})
+    result = asyncio.run(cloud_service(monkeypatch, handler).generate_drafts(blocks, 1, allow_fewer=True))
+    assert result.cards[0].image_intent.model_dump() == intent
+    assert len(sent) == 1 and "没有看到原图" in sent[0]["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("intent", [
+    {"need": "required", "reason": "需要图", "block_ids": []},
+    {"need": "helpful", "reason": "需要图", "block_ids": ["uncited-block"]},
+    {"need": "helpful", "reason": "", "block_ids": []},
+    {"need": "invented", "reason": "", "block_ids": []},
+])
+def test_planned_image_intent_must_bind_to_cited_source(monkeypatch, card, blocks, intent):
+    service = cloud_service(monkeypatch, lambda request: completion_response({"cards": [{**card.model_dump(), "image_intent": intent}]}))
+    result = asyncio.run(service.generate_drafts(blocks, 1, allow_fewer=True))
+    assert result.cards == [] and len(result.rejected_cards) == 1
+    assert "配图用途" in result.rejected_cards[0]["reason"]
+
+
+@pytest.mark.parametrize("change", [
+    {"question": ""},
+    {"evidence": [{"block_id": "missing", "quote": "原文"}]},
+    {"rubric": [{"point_id": "same", "text": "甲"}, {"point_id": "same", "text": "乙"}]},
+    {"image_intent": {"need": "required", "reason": "看图", "block_ids": ["uncited"]}},
+])
+def test_planned_generation_preserves_valid_neighbors_without_retry(monkeypatch, card, blocks, change):
+    calls = []
+    good = card.model_dump()
+    def handler(request):
+        calls.append(request)
+        return completion_response({"cards": [{**good, **change}, good]})
+    result = asyncio.run(cloud_service(monkeypatch, handler).generate_drafts(blocks, 2, allow_fewer=True))
+    assert len(calls) == 1 and len(result.cards) == 1
+    assert result.cards[0].question == card.question and result.card_positions == [2]
+    assert len(result.rejected_cards) == 1 and result.rejected_cards[0]["index"] == 1
+
+
+@pytest.mark.parametrize("payload", [{"cards": {}}, {"cards": None}, {"cards": [], "unknown": True}, {}])
+def test_invalid_planned_batch_envelope_remains_an_error(monkeypatch, blocks, payload):
+    service = cloud_service(monkeypatch, lambda request: completion_response(payload))
+    with pytest.raises(AIError, match="校验"):
+        asyncio.run(service.generate_drafts(blocks, 2, allow_fewer=True))
+
+
 @pytest.mark.parametrize("status", [302, 401, 403, 429, 500])
 def test_cloud_http_failures_are_safe_and_not_retried(monkeypatch, card, blocks, status):
     calls = []

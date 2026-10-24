@@ -14,7 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .db import Store
-from .apkg import build_apkg, export_snapshot
+from .apkg import build_apkg, export_snapshot, require_exportable
+from .approval import require_image_source, require_required_image, display_card
 from .attempts import AttemptService
 from .auto_cards import AutoCardService
 from .automatic_import import AutomaticImportService
@@ -22,6 +23,10 @@ from .source_calibration import SourceCalibrationService
 from .plugin_api import PluginAPI, install_plugin_error_handlers
 from .figure_recommendations import RecommendationService
 from .figure_vision import FigureVisionService
+from .image_auto_review import ImageAutoReviewService
+from .card_auto_review import CardAutoReviewService
+from .generation_jobs import GenerationJobService
+from .automatic_illustrations import AutomaticIllustrationService
 from .demo import DEMO_ID, seed_records
 from .evidence import validate_card
 from .ingest import parse_pdf_document, text_blocks
@@ -31,8 +36,9 @@ from .llm import AIError, AIService, Settings
 from .model_settings import ModelSettingsFile, install_model_settings, model_request
 from .paths import resolve_data_dir
 from .schemas import AttemptRequest, CardDraft, CardUpdate, GenerateRequest, SourceBlock, TextDocumentRequest, SourceCorrectionRequest, SourceRevisionRequest, SourcePageImageRequest
-from .sources import page_id, page_records, require_current_reviewed, save_page_revision, confirm_machine_page
-from .source_policy import machine_verified
+from .sources import page_id, page_records, require_current_source, save_page_revision
+from .source_proofread import SourceProofreadService
+from .source_quality import with_quality
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "ankisense" / "static"
@@ -53,6 +59,9 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
     store = Store(storage / "ankisense.sqlite3")
     recommendations = RecommendationService(store, storage)
     image_checks = FigureVisionService(recommendations, settings)
+    image_auto_review = ImageAutoReviewService(store, storage, settings)
+    card_auto_review = CardAutoReviewService(store, storage, settings, lambda: app.state.ai, image_auto_review)
+    source_proofread = SourceProofreadService(store, storage, lambda: app.state.ai)
     @asynccontextmanager
     async def lifespan(application):
         # Recover on service startup, never merely when another tool imports the module.
@@ -63,13 +72,22 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
         recommendations.recover()
         auto_cards.recover()
         automatic_imports.recover()
+        await generation_jobs.recover()
+        await automatic_illustrations.recover()
+        await card_auto_review.recover()
         try:
             yield
         finally:
+            automatic_illustrations.closing = True
             await automatic_imports.shutdown()
             await auto_cards.shutdown()
+            await generation_jobs.shutdown()
+            await automatic_illustrations.shutdown()
             await application.state.attempts.shutdown()
             await image_checks.shutdown()
+            await card_auto_review.shutdown()
+            await image_auto_review.shutdown()
+            await source_proofread.shutdown()
             await recommendations.shutdown()
 
     app = FastAPI(title="AnkiSense", version="0.1.0", lifespan=lifespan)
@@ -80,6 +98,9 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
     app.state.plugin = PluginAPI(store, storage, settings, app.state.attempts)
     app.state.recommendations = recommendations
     app.state.image_checks = image_checks
+    app.state.image_auto_review = image_auto_review
+    app.state.card_auto_review = card_auto_review
+    app.state.source_proofread = source_proofread
     app.state.active_model_requests = 0
     calibration = SourceCalibrationService(store, storage, lambda: app.state.ai, lambda: app.state.settings)
     app.state.source_calibration = calibration
@@ -94,6 +115,9 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
     app.include_router(calibration.router)
     app.include_router(recommendations.router)
     app.include_router(image_checks.router)
+    app.include_router(image_auto_review.router)
+    app.include_router(card_auto_review.router)
+    app.include_router(source_proofread.router)
     app.include_router(app.state.plugin.router)
     install_plugin_error_handlers(app)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "testserver"])
@@ -130,14 +154,48 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
         ids = {entry["block_id"] for entry in card["evidence"]}
         return [SourceBlock.model_validate(get_record("blocks", block_id, reader)) for block_id in sorted(ids)]
 
+    async def review_saved_card(card):
+        settings = app.state.settings
+        if card["status"] == "draft" and settings.mode == "cloud" and settings.api_key and settings.model and settings.base_url:
+            try:
+                await card_auto_review.queue(card["id"], card["version"])
+            except Exception:
+                # Content has already been committed. Return that saved card
+                # instead of making users regenerate a batch after a queue error.
+                def interrupted():
+                    current = get_record("cards", card["id"])
+                    if current["version"] != card["version"] or current["status"] != "draft":
+                        return []
+                    current["review_state"] = "interrupted"
+                    current.pop("review_task_fingerprint", None)
+                    return [("cards", current)]
+                store.mutate(interrupted)
+        return get_record("cards", card["id"])
+
+    automatic_illustrations = AutomaticIllustrationService(store, recommendations, image_auto_review,
+                                                          review_saved_card)
+    app.state.automatic_illustrations = automatic_illustrations
+    app.include_router(automatic_illustrations.router)
+
+    async def prepare_generated_card(card):
+        job = store.get("generation_jobs", card.get("generation_job_id", "")) or {}
+        return await automatic_illustrations.queue(card, enabled=job.get("auto_images", True))
+
+    generation_jobs = GenerationJobService(store, lambda: app.state.settings,
+                                           lambda: app.state.ai, prepare_generated_card)
+    app.state.generation_jobs = generation_jobs
+    app.include_router(generation_jobs.router)
+
     @app.get("/health")
     def health():
-        return {"status": "ok", "mode": app.state.settings.mode}
+        return {"application": "AnkiSense", "api_version": 1,
+                "status": "ok", "mode": app.state.settings.mode}
 
     @app.get("/api/state")
     def state():
         settings = app.state.settings
-        return {"mode": settings.mode, "model": settings.model if settings.mode == "cloud" else "内置演示规则", "configured": settings.mode == "demo" or bool(settings.api_key and settings.model and settings.base_url), "image_check": image_checks.status(), **{name: store.all(name) for name in ("documents", "blocks", "cards", "attempts", "source_pages", "media")}}
+        cards = [display_card(store, card) for card in store.all("cards")]
+        return {"mode": settings.mode, "model": settings.model if settings.mode == "cloud" else "内置演示规则", "configured": settings.mode == "demo" or bool(settings.api_key and settings.model and settings.base_url), "image_check": image_checks.status(), "generation_jobs": generation_jobs.list_jobs(), **{name: store.all(name) for name in ("documents", "blocks", "attempts", "source_proposals", "media")}, "cards": cards, "source_pages": [with_quality(page) for page in store.all("source_pages")]}
 
     @app.post("/api/demo")
     def demo():
@@ -180,7 +238,7 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
                 temporary.unlink(missing_ok=True)
         if existing:
             return existing
-        document = {"id": identifier, "title": Path(filename).stem, "filename": filename, "is_demo": False, "created_at": now(), "page_count": result["total"], "warning": result["warning"], "file_url": f"/api/documents/{identifier}/file", "extraction_mode": mode}
+        document = {"id": identifier, "title": Path(filename).stem, "filename": filename, "is_demo": False, "created_at": now(), "page_count": result["total"], "warning": result["warning"], "file_url": f"/api/documents/{identifier}/file", "extraction_mode": mode, "pdf_sha256": hashlib.sha256(content).hexdigest()}
         records = [("documents", document)]
         for page in result["pages"]:
             records.extend(page_records(identifier, page))
@@ -262,12 +320,7 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
     @app.put("/api/documents/{identifier}/pages/{page}")
     def correct_page(identifier: str, page: int, body: SourceCorrectionRequest):
         get_record("documents", identifier)
-        old = get_record("source_pages", page_id(identifier, page))
         text = body.text.strip()
-        if old["revision"] == body.revision and old["text"] == text and machine_verified(old):
-            return confirm_machine_page(store, identifier, page, body.revision, text)
-        if old["revision"] == body.revision and old["text"] == text and old.get("reviewed_at") and old["status"] in {"reviewed", "empty"}:
-            return old
         return save_page_revision(store, identifier, page, body.revision,
                                   {"text": text, "status": "reviewed" if text else "empty", "error": None,
                                    "reviewed_at": now()}, "proofread")
@@ -294,7 +347,7 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
     @app.post("/api/card-drafts")
     async def generate(body: GenerateRequest):
         blocks = [SourceBlock.model_validate(get_record("blocks", block_id)) for block_id in dict.fromkeys(body.block_ids)]
-        require_current_reviewed(store, blocks)
+        require_current_source(store, blocks)
         if len({block.document_id for block in blocks}) != 1:
             raise HTTPException(422, "每次请选择同一份材料中的片段。")
         if sum(len(block.text) for block in blocks) > 16000:
@@ -309,23 +362,32 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
             raise HTTPException(422, str(error)) from error
         document = get_record("documents", blocks[0].document_id)
         cards = [{**card.model_dump(), "id": str(uuid4()), "document_id": document["id"], "status": "draft", "version": 1, "is_demo": document["is_demo"], "created_at": now()} for card in batch.cards]
-        store.put_many([("cards", card) for card in cards], check=lambda: require_current_reviewed(store, blocks))
-        return {"cards": cards}
+        store.put_many([("cards", card) for card in cards], check=lambda: require_current_source(store, blocks))
+        return {"cards": [await review_saved_card(card) for card in cards]}
 
-    @app.put("/api/cards/{identifier}")
-    def update_card(identifier: str, body: CardUpdate):
+    def persist_card(identifier: str, body: CardUpdate):
         old = get_record("cards", identifier)
         if body.expected_version is not None and body.expected_version != old["version"]:
             raise HTTPException(409, "卡片版本已更新，请刷新后重新核对；当前草稿未覆盖已保存的内容。")
         changes = body.model_dump(exclude_none=True, exclude={"expected_version"})
         candidate = {**old, **changes, "version": old["version"] + 1, "updated_at": now()}
         if old.get("auto_quality"):
-            content_changed = any(candidate.get(name) != old.get(name) for name in (*CardDraft.model_fields, "images"))
+            content_changed = any(candidate.get(name) != old.get(name)
+                                  for name in (*CardDraft.model_fields, "images", "image_intent"))
             candidate["auto_quality"] = {**old["auto_quality"], "card_version": candidate["version"],
                                          **({"verdict": "stale"} if content_changed else {})}
             if content_changed and old.get("image_result"):
                 candidate["image_result"] = {**old["image_result"], "status": "stale",
                                              "message": "文字、引用或配图已修改，旧配图检查已过期；请在配图区域重新核对。"}
+        # A saved edit creates a new content version. Only a fresh check or an
+        # explicit human approval can release it for learning again.
+        candidate.pop("approval", None)
+        candidate.pop("approval_method", None)
+        candidate.pop("automatic_evidence", None)
+        candidate["review_state"] = "needs_review"
+        if (candidate.get("auto_illustration") or {}).get("state") in {"queued", "matching", "checking"}:
+            candidate["auto_illustration"] = {**candidate["auto_illustration"], "state": "interrupted",
+                                              "message": "卡片已修改，旧配图任务不会覆盖本次编辑；可重新匹配配图。"}
         try:
             blocks = source_models(candidate)
             if any(block.document_id != old["document_id"] for block in blocks):
@@ -335,25 +397,71 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
             raise HTTPException(422, str(error)) from error
         new_suggestions = []
         old_ids = {item["media_id"] for item in old.get("images") or []}
+        intent = old.get("image_intent") or {}
+        cited_ids = {block.block_id for block in blocks}
+        if (intent.get("need") in {"helpful", "required"}
+                and not set(intent.get("block_ids") or []) <= cited_ids):
+            # Editors update evidence, not generation metadata. Keep the image
+            # requirement usable after a source revision or a deliberate move
+            # to different source pages; never silently turn a required image off.
+            previous_pages = {(store.get("blocks", block_id) or {}).get("page")
+                              for block_id in intent["block_ids"]}
+            current_pages = {block.page for block in blocks}
+            rebound = [block for block in blocks if block.page in previous_pages]
+            if not previous_pages <= current_pages or not rebound:
+                rebound = blocks
+            candidate["image_intent"] = {**intent, "block_ids": [block.block_id for block in rebound]}
+            candidate["status"] = "draft"
+            target_pages = {block.page for block in rebound}
+            retained = []
+            for attachment in candidate.get("images") or []:
+                media = store.get("media", attachment["media_id"])
+                source = (media or {}).get("source") or {}
+                current_page = store.get("source_pages", page_id(old["document_id"], source.get("page"))) if source else None
+                outdated = (not media or (source and (
+                    source.get("document_id") != old["document_id"] or source.get("page") not in target_pages
+                    or not current_page or source.get("revision") != current_page.get("revision"))))
+                if attachment["media_id"] in old_ids and outdated:
+                    continue  # Detach the stale reference; retain its media file.
+                retained.append(attachment)
+            candidate["images"] = retained
+            candidate["auto_illustration"] = {"state": "interrupted", "card_version": candidate["version"],
+                                               "updated_at": now(),
+                                               "message": "引用已更新，配图要求已关联当前原文；旧版本或其他页的配图已移除，请重新匹配并检查。"}
         for attachment in candidate.get("images") or []:
             record, _ = require_media(store, storage, attachment["media_id"], old["document_id"])
-            # Newly accepted suggestions must be saved as a draft first. A
-            # separate explicit approval reviews the final text and pictures.
+            # New suggestions enter the automatic text-and-image check as drafts.
             if record.get("source", {}).get("origin") == "figure_recommendation" and attachment["media_id"] not in old_ids:
                 if candidate["status"] == "approved":
                     candidate["status"] = "draft"
                 new_suggestions.append(record)
         if candidate["status"] == "approved":
-            candidate["source_outdated"] = False
+            candidate["approval"] = {"method": "human", "card_version": candidate["version"], "approved_at": now()}
+            candidate["review_state"] = "human_approved"
         def check_card_version():
             if get_record("cards", identifier)["version"] != old["version"]:
                 raise HTTPException(409, "卡片或原文刚刚更新，请刷新后核对再保存。")
             for media_record in new_suggestions:
                 recommendations.validate_new_attachment(media_record, identifier, old["version"], {block.page for block in blocks}, candidate)
+            try:
+                require_current_source(store, blocks)
+            except HTTPException:
+                if candidate["status"] == "approved":
+                    raise
+                candidate["source_outdated"] = True
+            else:
+                candidate["source_outdated"] = False
             if candidate["status"] == "approved":
-                require_current_reviewed(store, blocks)
+                require_required_image(store, candidate)
+                for attachment in candidate.get("images") or []:
+                    require_image_source(store, candidate, get_record("media", attachment["media_id"]))
         store.put_many([("cards", candidate)], check=check_card_version)
         return candidate
+
+    @app.put("/api/cards/{identifier}")
+    async def update_card(identifier: str, body: CardUpdate):
+        candidate = await asyncio.to_thread(persist_card, identifier, body)
+        return await review_saved_card(candidate)
 
     @app.post("/api/attempts")
     async def submit(body: AttemptRequest):
@@ -368,9 +476,11 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
         return await app.state.attempts.retry(identifier)
 
     def export_records(request, reader=None):
-        for card in (reader or store).all("cards"):
+        source = reader or store
+        for card in source.all("cards"):
             if card["status"] != "approved":
                 continue
+            require_exportable(card, source)
             document = get_record("documents", card["document_id"], reader)
             blocks = source_models(card, reader)
             pages = ", ".join(str(page) for page in sorted({block.page for block in blocks})) if document["id"].startswith("pdf-") else ""
@@ -378,17 +488,19 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
 
     @app.get("/api/export")
     def export(request: Request):
-        stream = io.StringIO(newline="")
-        # Anki import directives; data has no header note and HTML is disabled.
-        stream.write(f"#separator:Tab\n#html:false\n#columns:{EXPORT_COLUMNS}\n")
-        writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
-        for _, values in export_records(request):
-            writer.writerow(values)
+        with export_snapshot(store) as snapshot:
+            stream = io.StringIO(newline="")
+            # Anki import directives; data has no header note and HTML is disabled.
+            stream.write(f"#separator:Tab\n#html:false\n#columns:{EXPORT_COLUMNS}\n")
+            writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
+            for _, values in export_records(request, snapshot):
+                writer.writerow(values)
         return Response(stream.getvalue().encode("utf-8"), media_type="text/tab-separated-values; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="ankisense-approved.tsv"'})
 
     @app.get("/api/export/media")
     def export_with_media(request: Request):
-        content = media_zip(export_records(request), store, storage)
+        with export_snapshot(store) as snapshot:
+            content = media_zip(export_records(request, snapshot), snapshot, storage)
         return Response(content, media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="ankisense-approved-media.zip"'})
 
     @app.get("/api/export/apkg")

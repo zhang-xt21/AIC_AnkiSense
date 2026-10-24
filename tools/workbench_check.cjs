@@ -8,10 +8,11 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { chromium } = require("playwright");
 const { project, pythonExecutable, browserOptions } = require("./browser_runtime.cjs");
+const navigation = require("./browser_navigation.cjs");
 const output = path.join(project, ".ui-checks", "20260927-workbench");
 const runId = new Date().toISOString().replace(/[:.]/g, "-");
 const runDir = path.join(output, `run-${runId}`);
-const base = "http://127.0.0.1:8976";
+const base = `http://127.0.0.1:${process.env.ANKISENSE_UI_PORT || 8976}`;
 const png = path.join(runDir, "stack-fixture.png");
 const results = [];
 const errors = [];
@@ -51,13 +52,13 @@ async function screenshot(name) {
   fs.writeFileSync(path.join(runDir, `${name}-layout.json`), JSON.stringify(layout, null, 2));
 }
 async function review(cardId = "demo-stack") {
-  await page.locator('button[data-view="review"]').click();
+  await navigation.openReview(page);
   await page.getByLabel("选择编辑卡片", { exact: true }).selectOption(cardId);
   await page.locator(".workbench-editor").waitFor();
 }
 function editor() { return page.locator(".workbench-editor"); }
 async function previewSide(side) { await page.locator(".workbench-preview").getByRole("button", { name: side, exact: true }).click(); }
-async function save(label = "保存草稿", expected = 200) {
+async function save(label = "保存并检查", expected = 200) {
   const response = page.waitForResponse(r => r.url().startsWith(`${base}/api/cards/`) && r.request().method() === "PUT");
   await editor().getByRole("button", { name: label, exact: true }).click();
   const received = await response;
@@ -170,7 +171,9 @@ async function hasPreviewImage(expected) {
   });
 
   await check("Approval enables practice without exposing answer-side images before a valid answer", async () => {
-    const saved = await save("核对并批准"); assert.equal(saved.status, "approved");
+    await navigation.stage(page, "audit");
+    await editor().getByText("自行核对并处理", { exact: true }).click();
+    const saved = await save("人工核对并批准"); assert.equal(saved.status, "approved");
     await page.locator('button[data-view="practice"]').click();
     await page.getByLabel("选择练习卡片", { exact: true }).selectOption("demo-stack");
     assert.equal(await page.locator(".practice-panel .card-image-gallery img").count(), 0);
@@ -190,7 +193,7 @@ async function hasPreviewImage(expected) {
     await editor().getByLabel("问题", { exact: true }).fill("本标签页尚未保存的题目");
     const fresh = await getCard();
     const updated = await api("/api/cards/demo-stack", { method: "PUT", ...json(payload(fresh, { question: "另一标签页保存的新题目", status: "draft" })) });
-    await save("保存草稿", 409);
+    await save("保存并检查", 409);
     assert.equal(await editor().getByLabel("问题", { exact: true }).inputValue(), "本标签页尚未保存的题目");
     assert.equal((await getCard()).question, updated.question);
     assert.match(await editor().locator(".inline-error").innerText(), /更新|版本|刷新/);

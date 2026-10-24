@@ -14,6 +14,8 @@ import shutil
 import threading
 from uuid import uuid4
 
+from .paths import resolve_data_dir
+
 
 MAX_RENDER_SIDE = 2400
 MAX_RENDER_PIXELS = 4_000_000
@@ -96,7 +98,7 @@ def _get_engine(model_root=None):
         import onnxruntime  # noqa: F401: fail with an actionable message early
     except ImportError as error:
         raise LocalOCRError("本地 OCR 依赖未安装，请安装项目 requirements.txt 中的依赖后重试。") from error
-    model_root = Path(model_root) if model_root is not None else Path(__file__).resolve().parents[1] / "data" / "ocr-models"
+    model_root = Path(model_root) if model_root is not None else resolve_data_dir() / "ocr-models"
     try:
         model_root.mkdir(parents=True, exist_ok=True)
         bundled = Path(rapidocr.__file__).resolve().parent / "models"
@@ -202,10 +204,23 @@ def _recognize_image(image_bytes: bytes) -> dict:
         scores = getattr(recognition, "scores", None)
         lines, offset = [], 0
         for index, text in enumerate(texts):
-            lines.append({"text": text,
-                          "bbox": _normalized_box(_optional_item(boxes, index), width, height),
-                          "score": _raw_score(_optional_item(scores, index)),
-                          "start": offset, "end": offset + len(text)})
+            item = {"text": text,
+                    "bbox": _normalized_box(_optional_item(boxes, index), width, height),
+                    "score": _raw_score(_optional_item(scores, index)),
+                    "start": offset, "end": offset + len(text)}
+            score = item["score"]
+            if score is not None and 0 <= score <= 1:
+                item["confidence"] = round(score, 4)
+            try:
+                box = _optional_item(boxes, index)
+                if hasattr(box, "tolist"):
+                    box = box.tolist()
+                pixels = [[round(float(coordinate), 2) for coordinate in point] for point in box]
+                if len(pixels) == 4 and all(len(point) == 2 and all(math.isfinite(v) for v in point) for point in pixels):
+                    item["bbox_pixels"] = pixels
+            except (TypeError, ValueError, OverflowError):
+                pass
+            lines.append(item)
             offset += len(text) + 1  # Newlines join lines without rewriting them.
         text = "\n".join(texts)
         return {**info, "text": text, "raw_text": text, "ocr_lines": lines,

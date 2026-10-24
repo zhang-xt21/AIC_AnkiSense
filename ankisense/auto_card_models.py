@@ -67,6 +67,9 @@ class CardQualityReport(StrictModel):
     verdict: Literal["clear", "needs_review"]
     issues: list[QualityIssue] = Field(max_length=32)
     supported_point_ids: list[str] = Field(max_length=12)
+    # New visual reviews retain the independently validated whole-card checks.
+    # Older quality receipts remain readable without claiming this extra check.
+    review_checks: dict | None = None
 
     @model_validator(mode="after")
     def consistent_verdict(self):

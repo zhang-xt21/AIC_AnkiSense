@@ -16,9 +16,10 @@ from urllib.parse import parse_qs, urlsplit
 import genanki
 from fastapi import HTTPException
 
+from .evidence import validate_card
 from .media import EXPORT_COLUMNS, MAX_EXPORT_BYTES, MAX_UPLOAD_BYTES, html_text, normalize_image, require_media
-from .schemas import SourceBlock
-from .sources import require_current_reviewed
+from .schemas import CardDraft, SourceBlock
+from .approval import require_approved_sources, require_image_source
 
 # A released model's ID, field order and template ordinals must remain stable.
 MODEL_ID = 1786831001
@@ -127,16 +128,44 @@ def _practice_url(value, identifier):
     return html.escape(value, quote=True)
 
 
-def _reviewed(card, store):
+def require_exportable(card, store):
+    """Reject an approved card whose evidence is no longer reviewable.
+
+    All export formats use this same check against the same database snapshot.
+    """
+    if card.get("status") != "approved":
+        raise HTTPException(409, "卡片尚未批准，请先到卡片审核页确认。")
     if card.get("source_outdated"):
         raise HTTPException(409, "卡片引用的原文已更新，请重新审核后导出。")
-    blocks = []
-    for evidence in card["evidence"]:
-        block = store.get("blocks", evidence["block_id"])
-        if block is None or block["document_id"] != card["document_id"]:
-            raise HTTPException(409, "卡片引用的原文缺失，请重新审核后导出。")
-        blocks.append(SourceBlock.model_validate(block))
-    require_current_reviewed(store, blocks, card)
+    try:
+        blocks = []
+        # Several distinct quotations may legitimately cite the same block.
+        # Load each source once; validate_card still checks every quotation.
+        for identifier in dict.fromkeys(evidence["block_id"] for evidence in card["evidence"]):
+            block = store.get("blocks", identifier)
+            if block is None or block["document_id"] != card["document_id"]:
+                raise HTTPException(409, "卡片引用的原文缺失，请重新审核后导出。")
+            blocks.append(SourceBlock.model_validate(block))
+        validate_card(CardDraft.model_validate({key: card[key] for key in CardDraft.model_fields
+                                               if key in card}), blocks)
+    except (KeyError, TypeError, ValueError) as error:
+        raise HTTPException(409, "卡片内容或原文引用已失效，请重新审核后导出。") from error
+    require_approved_sources(store, card, blocks)
+    for attachment in card.get("images") or []:
+        try:
+            media = store.get("media", attachment["media_id"])
+        except (KeyError, TypeError) as error:
+            raise HTTPException(409, "卡片配图信息无效，请重新审核配图。") from error
+        if media is None:
+            raise HTTPException(409, "卡片配图记录缺失，请重新添加图片后审核。")
+        source = media.get("source") or {}
+        if not source:
+            continue  # A manually uploaded image is not bound to a PDF revision.
+        if not isinstance(source, dict):
+            raise HTTPException(409, "卡片配图来源无效，请重新审核配图。")
+        if source.get("document_id") != card["document_id"]:
+            raise HTTPException(409, "卡片配图与讲义不一致，请重新审核配图。")
+        require_image_source(store, card, media)
 
 
 def anki_model():
@@ -190,7 +219,7 @@ def build_apkg(rows, store, storage: Path) -> bytes:
     for card, values in rows:
         if card["status"] != "approved":
             continue
-        _reviewed(card, store)
+        require_exportable(card, store)
         fields = note_fields(card, values)
         for attachment in card.get("images") or []:
             _, path = require_media(store, storage, attachment["media_id"], card["document_id"])

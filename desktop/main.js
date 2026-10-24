@@ -1,197 +1,107 @@
 "use strict";
-
-// Thin Electron shell for the AnkiSense web app.
-//
-// This file owns no web content. It either connects to an already-running
-// backend (`--dev`), or spawns the FastAPI backend itself, then loads the
-// same local URL in a native window. The web UI keeps living in
-// ../ankisense/static and ../ankisense/*.py; any change there shows up here
-// on the next reload.
-
 const { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } = require("electron");
-const { spawn } = require("child_process");
-const http = require("http");
-const path = require("path");
-const fs = require("fs");
-
+const { spawn } = require("node:child_process");
+const path = require("node:path");
+const fs = require("node:fs");
+const { probeBackend } = require("./backend-health.cjs");
 const HOST = "127.0.0.1";
-const PORT = 8765; // Keep in sync with the backend default in start.ps1.
-const URL = `http://${HOST}:${PORT}`;
-const READY_TIMEOUT_MS = 30_000;
-
+const requestedPort = Number(process.env.ANKISENSE_DESKTOP_PORT || 8765);
+const PORT = Number.isInteger(requestedPort) && requestedPort > 0 && requestedPort <= 65535 ? requestedPort : 8765;
+const BASE_URL = `http://${HOST}:${PORT}`;
+const READY_TIMEOUT_MS = 60_000;
 const PROJECT_ROOT = path.resolve(__dirname, "..");
-
-let backendProc = null;
-let mainWindow = null;
-
-function isInternal(url) {
-  return url.startsWith("http://127.0.0.1:") || url.startsWith("http://localhost:");
+let backendProc = null, backendFailure = "", backendLog = "", mainWindow = null, quitting = false;
+if (process.env.ANKISENSE_DESKTOP_USER_DATA) app.setPath("userData", path.resolve(process.env.ANKISENSE_DESKTOP_USER_DATA));
+function isInternal(value) {
+  try { return new URL(value).origin === BASE_URL; } catch { return false; }
 }
-
 function backendCommand() {
-  if (app.isPackaged) {
+  if (app.isPackaged || process.argv.includes("--frozen-backend")) {
     const name = process.platform === "win32" ? "ankisense-backend.exe" : "ankisense-backend";
-    return {
-      executable: path.join(process.resourcesPath, "backend", name),
-      args: ["--host", HOST, "--port", String(PORT)],
-      cwd: path.dirname(process.execPath),
-    };
+    const directory = app.isPackaged ? path.join(process.resourcesPath, "backend") : path.join(__dirname, "dist", "ankisense-backend");
+    return { executable: path.join(directory, name), args: ["--host", HOST, "--port", String(PORT)], cwd: directory };
   }
-  const scriptDir = process.platform === "win32" ? "Scripts" : "bin";
-  const exe = process.platform === "win32" ? "python.exe" : "python";
   return {
-    executable: path.join(PROJECT_ROOT, ".venv", scriptDir, exe),
-    args: ["-m", "uvicorn", "ankisense.app:app", "--host", HOST, "--port", String(PORT)],
-    cwd: PROJECT_ROOT,
+    executable: path.join(PROJECT_ROOT, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python"),
+    args: ["-m", "uvicorn", "ankisense.app:app", "--host", HOST, "--port", String(PORT)], cwd: PROJECT_ROOT,
   };
 }
-
-function backendIsUp() {
-  return new Promise((resolve) => {
-    const req = http.get({ host: HOST, port: PORT, path: "/", timeout: 1000 }, () => {
-      resolve(true);
-    });
-    req.on("error", () => resolve(false));
-    req.on("timeout", () => {
-      req.destroy();
-      resolve(false);
-    });
-  });
+function spawnBackend() {
+  const { executable, args, cwd } = backendCommand();
+  if (!fs.existsSync(executable)) throw new Error("找不到本地后端。开发环境请先运行 setup.ps1；安装版请重新安装完整程序。");
+  const env = { ...process.env };
+  if (app.isPackaged || process.env.ANKISENSE_DESKTOP_USER_DATA) env.ANKISENSE_DATA_DIR = path.join(app.getPath("userData"), "data");
+  backendFailure = "";
+  const child = spawn(executable, args, { cwd, windowsHide: true, env });
+  backendProc = child;
+  const log = chunk => { backendLog = (backendLog + chunk.toString()).slice(-16000); };
+  child.stdout.on("data", log); child.stderr.on("data", log);
+  child.on("error", error => { backendFailure = error.message; });
+  child.on("exit", code => { if (backendProc === child) backendProc = null; if (!quitting) backendFailure = `本地后端已退出（${code ?? "未知状态"}）。`; });
 }
-
 async function waitForBackend() {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (await backendIsUp()) return true;
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    if (backendFailure) throw new Error(backendFailure);
+    const result = await probeBackend({ host: HOST, port: PORT });
+    if (result.ready) return;
+    if (result.responding) throw new Error(result.reason);
+    await new Promise(resolve => setTimeout(resolve, 250));
   }
-  return false;
+  throw new Error("本地后端启动超时，请关闭程序后重试。");
 }
-
-function spawnBackend() {
-  const { executable, args, cwd } = backendCommand();
-  if (!fs.existsSync(executable)) {
-    throw new Error(`Backend not found at ${executable}. Run .\\setup.ps1 in the project root first.`);
-  }
-  const env = { ...process.env };
-  if (app.isPackaged) {
-    // Installed app has no project ./data; point the backend at a writable,
-    // per-user data directory instead of the read-only install location.
-    env.ANKISENSE_DATA_DIR = path.join(app.getPath("userData"), "data");
-  }
-  backendProc = spawn(
-    executable,
-    args,
-    { cwd, windowsHide: true, env }
-  );
-  backendProc.stdout.on("data", (chunk) => process.stdout.write(`[backend] ${chunk}`));
-  backendProc.stderr.on("data", (chunk) => process.stderr.write(`[backend] ${chunk}`));
-  backendProc.on("error", (error) => process.stderr.write(`[backend] ${error.message}\n`));
-  backendProc.on("exit", () => {
-    backendProc = null;
-  });
-}
-
 function stopBackend() {
-  if (!backendProc) return;
-  backendProc.kill();
-  backendProc = null;
+  quitting = true;
+  // Only this instance's own child is terminated. Reused services are not owned.
+  const child = backendProc; backendProc = null;
+  if (!child || child.exitCode !== null || !child.pid) return;
+  if (process.platform === "win32") spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+  else child.kill();
 }
-
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    minWidth: 960,
-    minHeight: 640,
-    frame: false,
-    title: "AnkiSense",
-    backgroundColor: "#f6f7f9",
-    webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
-
-  // Internal practice links stay in the app; external links open in the browser.
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (isInternal(url)) return { action: "allow" };
-    shell.openExternal(url);
-    return { action: "deny" };
-  });
-  mainWindow.webContents.on("will-navigate", (event, url) => {
-    if (isInternal(url)) return;
-    event.preventDefault();
-    shell.openExternal(url);
-  });
-
-  mainWindow.loadURL(URL)
-    .then(() => console.log(`AnkiSense window loaded from ${URL}`))
-    .catch((err) => {
-      dialog.showErrorBox(
-        "AnkiSense",
-        `Could not open the AnkiSense app at ${URL}.\n\n${err.message}`
-      );
-    });
-
-  mainWindow.on("closed", () => {
-    mainWindow = null;
-  });
-  mainWindow.on("maximize", () => mainWindow.webContents.send("window:maximize-change", true));
-  mainWindow.on("unmaximize", () => mainWindow.webContents.send("window:maximize-change", false));
+function openExternal(value) {
+  try { if (["https:", "http:", "mailto:"].includes(new URL(value).protocol)) shell.openExternal(value); } catch { /* Ignore malformed navigation. */ }
 }
-
-function windowFor(event) {
-  return BrowserWindow.fromWebContents(event.sender);
-}
-
-ipcMain.on("window:minimize", (event) => windowFor(event)?.minimize());
-ipcMain.on("window:maximize", (event) => {
-  const win = windowFor(event);
-  if (!win) return;
-  if (win.isMaximized()) win.unmaximize();
-  else win.maximize();
-});
-ipcMain.on("window:close", (event) => windowFor(event)?.close());
-
-app.whenReady().then(async () => {
-  // No File/Edit/View/Window menu; the app is a single-purpose shell.
-  Menu.setApplicationMenu(null);
-
-  const spawnFlag = process.argv.includes("--spawn-backend");
-  const devFlag = process.argv.includes("--dev");
-
-  if (spawnFlag) {
-    spawnBackend();
-  } else if (!devFlag) {
-    // Default: reuse a running backend if present, otherwise start one.
-    if (!(await backendIsUp())) spawnBackend();
-  }
-  // In --dev mode, assume the backend is already running; loadURL surfaces a
-  // friendly error if it is not.
-
-  if (backendProc && !(await waitForBackend())) {
-    dialog.showErrorBox(
-      "AnkiSense",
-      `Backend did not become ready on ${URL} within ${READY_TIMEOUT_MS / 1000}s.`
-    );
-    app.quit();
-    return;
-  }
-
-  await session.defaultSession.clearCache();
-
-  createWindow();
-
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+async function createWindow() {
+  const win = new BrowserWindow({
+    width: 1280, height: 860, minWidth: 960, minHeight: 640, frame: false,
+    show: !process.argv.includes("--hidden"), title: "AnkiSense", backgroundColor: "#f6f7f9",
+    webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
-});
-
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
-});
-
+  mainWindow = win;
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (isInternal(url)) return { action: "allow", overrideBrowserWindowOptions: { webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } } };
+    openExternal(url); return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (event, url) => { if (!isInternal(url)) { event.preventDefault(); openExternal(url); } });
+  win.on("closed", () => { if (mainWindow === win) mainWindow = null; });
+  win.on("maximize", () => win.webContents.send("window:maximize-change", true));
+  win.on("unmaximize", () => win.webContents.send("window:maximize-change", false));
+  await win.loadURL(BASE_URL);
+}
+function windowFor(event) { return BrowserWindow.fromWebContents(event.sender); }
+ipcMain.on("window:minimize", event => windowFor(event)?.minimize());
+ipcMain.on("window:maximize", event => { const win = windowFor(event); if (win) win.isMaximized() ? win.unmaximize() : win.maximize(); });
+ipcMain.on("window:close", event => windowFor(event)?.close());
+if (!app.requestSingleInstanceLock()) app.quit();
+else {
+  app.on("second-instance", (_event, argv) => { if (argv.includes("--hidden")) return; if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); } });
+  app.whenReady().then(async () => {
+    Menu.setApplicationMenu(null);
+    const result = await probeBackend({ host: HOST, port: PORT });
+    if (result.responding && !result.ready) throw new Error(`${result.reason}。请释放端口 ${PORT} 后重试。`);
+    if (process.argv.includes("--spawn-backend") && result.responding) throw new Error(`端口 ${PORT} 已有 AnkiSense 运行。请关闭旧服务或使用默认启动方式。`);
+    if (!result.ready) {
+      if (process.argv.includes("--dev")) throw new Error(`未找到开发后端，请先启动 ${BASE_URL}。`);
+      spawnBackend(); await waitForBackend();
+    }
+    await session.defaultSession.clearCache(); await createWindow();
+    app.on("activate", () => { if (!BrowserWindow.getAllWindows().length) createWindow().catch(showStartupError); });
+  }).catch(showStartupError);
+}
+function showStartupError(error) {
+  let logPath = "";
+  try { const directory = app.getPath("userData"); fs.mkdirSync(directory, { recursive: true }); logPath = path.join(directory, "startup.log"); fs.writeFileSync(logPath, `${error.message}\n${backendLog}`); } catch { /* Dialog still reports failure. */ }
+  dialog.showErrorBox("AnkiSense 启动未完成", `${error.message}${logPath ? `\n\n诊断日志：${logPath}` : ""}`); app.quit();
+}
+app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 app.on("before-quit", stopBackend);

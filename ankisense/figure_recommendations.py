@@ -20,7 +20,7 @@ from .figure_context import compose_context
 from .media import normalize_image, save_media
 from .ocr import render_page_png
 from .schemas import CardDraft, ImageRecommendationAdoptRequest, ImageRecommendationRequest, SourceBlock
-from .sources import page_id, require_current_reviewed
+from .sources import page_id, require_current_source
 
 
 _PIPELINE_LOCK = threading.Lock()
@@ -172,7 +172,7 @@ class RecommendationService:
             blocks.append(SourceBlock.model_validate(record))
         if card.get("source_outdated"):
             raise HTTPException(409, "引用原文已更新，请先保存当前版本的引用。")
-        require_current_reviewed(self.store, blocks)
+        require_current_source(self.store, blocks)
         try:
             validate_card(CardDraft.model_validate({key: card[key] for key in CardDraft.model_fields}), blocks)
         except ValueError as error:
@@ -257,7 +257,7 @@ class RecommendationService:
         for page in captured["pages"]:
             key = "figpage-" + _hash(f"{captured['pdf_hash']}:{PARSER_VERSION}:{page}".encode())
             record = self.store.get("figure_pages", key)
-            if record and not record.get("warning"):
+            if record and not record.get("warning") and isinstance(record.get("regions_truncated"), bool):
                 cached[page] = record
             else:
                 missing.append((page, key))
@@ -278,7 +278,9 @@ class RecommendationService:
                                         "caption": str(region.get("caption", ""))[:500], "nearby_text": str(region.get("nearby_text", ""))[:2000],
                                         "caption_refs": region.get("caption_refs", [])})
                 record = {"id": key, "pdf_hash": captured["pdf_hash"], "parser_version": PARSER_VERSION,
-                          "page": page, "regions": regions, "warning": item.get("warning"), "created_at": _now()}
+                          "page": page, "regions": regions,
+                          "regions_truncated": len(item.get("regions", [])) > 100,
+                          "warning": item.get("warning"), "created_at": _now()}
                 if isinstance(item.get("text_regions"), list):
                     record["text_regions"] = item["text_regions"]
                 failed_page = missing_page or bool(item.get("warning"))

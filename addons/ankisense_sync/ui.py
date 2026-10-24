@@ -441,6 +441,11 @@ def show_sync_dialog(main_window):
 
 
 def register(main_window):
+    # The reviewer action is installed alongside the sync menu. Import here to
+    # keep the existing add-on entry point and its non-Anki client import safe.
+    from .answer_ui import register as register_answer
+
+    register_answer(main_window)
     if getattr(main_window, "_ankisense_sync_action", None) is not None:
         return
     action = QAction(MENU_TEXT, main_window)

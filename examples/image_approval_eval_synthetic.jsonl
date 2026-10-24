@@ -1,0 +1,7 @@
+{"case_id":"synthetic-dev-01","document_id":"synthetic-pdf-A","split":"development","category":"single_diagram","human_label":"correct","severe_error":false,"decision":"auto_pass","current":true}
+{"case_id":"synthetic-dev-02","document_id":"synthetic-pdf-A","split":"development","category":"multi_figure","human_label":"wrong","severe_error":true,"decision":"attention","current":true}
+{"case_id":"synthetic-dev-03","document_id":"synthetic-pdf-A","split":"development","category":"formula","human_label":"correct","severe_error":false,"decision":"needs_review","current":false}
+{"case_id":"synthetic-hold-01","document_id":"synthetic-pdf-B","split":"holdout","category":"single_diagram","human_label":"correct","severe_error":false,"decision":"auto_pass","current":true}
+{"case_id":"synthetic-hold-02","document_id":"synthetic-pdf-B","split":"holdout","category":"single_diagram","human_label":"wrong","severe_error":false,"decision":"auto_pass","current":true}
+{"case_id":"synthetic-hold-03","document_id":"synthetic-pdf-C","split":"holdout","category":"scan","human_label":"wrong","severe_error":true,"decision":"needs_review","current":false}
+{"case_id":"synthetic-hold-04","document_id":"synthetic-pdf-C","split":"holdout","category":"table","human_label":"correct","severe_error":false,"decision":"unchecked","current":false}

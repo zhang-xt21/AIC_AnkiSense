@@ -1,7 +1,8 @@
 "use strict";
 
 function initializeAutomaticWorkspace() {
-  Object.assign(app, { materialImports: [], materialImportId: null, importBusy: false, importError: "", importTimer: null, automaticAnswers: new Set() });
+  clearTimeout(app.importTimer);
+  Object.assign(app, { materialImports: [], materialImportId: null, importBusy: false, importError: "", importTimer: null, automaticAnswers: new Set(), importPreferences: { count: "", autoImages: true }, importRetrying: null });
   viewNames.cards = "卡牌结果";
 }
 
@@ -46,6 +47,21 @@ async function loadMaterialImports(initial = false) {
   }
 }
 
+async function retryMaterialImport(record) {
+  if (app.importRetrying || activeMaterialImport(record)) return;
+  app.importRetrying = record.id;
+  try {
+    const updated = await api(`/api/material-imports/${encodeURIComponent(record.id)}/retry`, { method: "POST" });
+    app.materialImports = app.materialImports.map(item => item.id === updated.id ? updated : item);
+    app.materialImportId = updated.id;
+    history.replaceState(null, "", `?import=${encodeURIComponent(updated.id)}`);
+    app.view = "cards";
+    await refresh();
+    await loadMaterialImports();
+  } catch (error) { app.importError = error.message; }
+  finally { app.importRetrying = null; render(); }
+}
+
 function renderAutomaticImportStatus() {
   const box = el("div", { id: "automatic-import-status", "aria-live": "polite" });
   if (app.importError) box.append(note(app.importError, "warning"));
@@ -54,8 +70,13 @@ function renderAutomaticImportStatus() {
     const progress = job?.progress || record.progress;
     const row = el("article", { class: "automatic-import-row", "data-import-status": record.status },
       el("div", {}, text("strong", record.filename), text("p", record.message || "正在准备…", "meta")),
-      badge(activeMaterialImport(record) ? "自动处理中" : record.status === "completed" ? "已完成" : "处理详情", activeMaterialImport(record) ? "blue" : "green"));
+      badge(({ pending: "等待处理", running: "自动处理中", completed: "已完成", partial: "部分完成", failed: "未完成", cancelled: "已停止", interrupted: "已中断，可继续", outdated: "来源已更新", awaiting_confirmation: "需要处理" })[record.status] || "处理详情", activeMaterialImport(record) ? "blue" : record.status === "completed" ? "green" : "amber"));
     if (progress?.total) row.append(el("progress", { max: progress.total, value: progress.completed, "aria-label": `${record.filename}处理进度` }));
+    if (record.plan) {
+      const plan = record.plan;
+      row.append(text("p", `系统建议 ${plan.recommended_count} 张 · 本次目标 ${plan.target_count} 张${plan.total_batches ? ` · 分 ${plan.total_batches} 批处理` : ""}`, "helper automatic-import-plan"));
+      if (plan.suggestion_reason) row.append(text("p", plan.suggestion_reason, "helper"));
+    }
     if (job?.card_ids?.length) row.append(text("span", `${job.card_ids.length} 张卡牌已生成`, "meta"));
     if (record.error || job?.error) row.append(note(record.error || job.error, "warning"));
     row.append(button("查看卡牌", () => {
@@ -64,21 +85,37 @@ function renderAutomaticImportStatus() {
       if (record.document_id) app.documentId = record.document_id;
       setView("cards");
     }, "btn secondary small"));
+    const retryable = record.retryable ?? ["failed", "partial", "cancelled", "interrupted"].includes(record.status);
+    if (retryable) row.append(button(app.importRetrying === record.id ? "正在补跑…" : record.status === "interrupted" ? "继续未完成部分" : "重试未完成部分", () => retryMaterialImport(record), "btn secondary small", Boolean(app.importRetrying)));
     box.append(row);
   }
   return box;
 }
 
 function renderAutomaticImport() {
+  const preferences = app.importPreferences;
+  const count = el("input", { type: "number", min: "1", max: "600", step: "1", value: preferences.count, placeholder: "按讲义自动决定", "aria-label": "自动制卡目标数量" });
+  count.addEventListener("input", () => { preferences.count = count.value; });
+  const images = el("input", { type: "checkbox", checked: preferences.autoImages, "aria-label": "自动匹配并检查讲义配图" });
+  images.addEventListener("change", () => { preferences.autoImages = images.checked; });
+  const options = el("details", { class: "automatic-import-options" }, text("summary", "高级选项：张数与配图"),
+    field("目标张数（留空使用系统建议，1–600）", count),
+    el("label", { class: "generation-scope-toggle" }, images, "自动匹配并检查讲义配图"),
+    text("p", "张数是目标；证据不足时少生成，不凑数。生成和保存后自动检查，必要时会发送相关文字、配图与原页至已配置模型。", "helper"));
   const file = el("input", { type: "file", accept: ".ppt,.pptx,.pdf", "aria-label": "选择讲义，自动制卡", disabled: app.importBusy });
   file.addEventListener("change", async () => {
     if (!file.files[0] || app.importBusy) return;
+    if (count.value && (!count.checkValidity() || !/^\d+$/.test(count.value))) {
+      app.importError = "目标张数应为 1–600 的整数，或留空使用系统建议。"; render(); return;
+    }
     app.importBusy = true;
     app.importError = "";
     file.disabled = true;
     try {
       const data = new FormData();
       data.append("file", file.files[0]);
+      if (preferences.count) data.append("count", preferences.count);
+      data.append("auto_images", String(preferences.autoImages));
       const record = await api("/api/material-imports", { method: "POST", body: data });
       app.materialImportId = record.id;
       history.replaceState(null, "", `?import=${encodeURIComponent(record.id)}`);
@@ -92,12 +129,12 @@ function renderAutomaticImport() {
       render();
     } finally { app.importBusy = false; file.disabled = false; if (app.importError && app.view === "materials") render(); }
   });
-  return panel("导入讲义，自动得到卡牌", "选好文件即可，系统会自动完成识别、制卡、检查和原页配图。",
+  return panel("导入讲义，自动得到卡牌", "选好文件即可，系统会自动完成识别、制卡、检查和按需配图。",
     el("div", { class: "automatic-import" }, el("div", { class: "dropzone" }, text("div", "↥", "upload-symbol"),
       text("strong", app.importBusy ? "正在上传讲义…" : "选择 PPT / PPTX / PDF 讲义"),
       text("p", "支持整份讲义，最多 500 页、50 MB。导入后无需逐页确认或再次点击生成。"), file),
       !modeIsCloud() || !app.data.configured ? note("请先在模型设置中保存可用的 API 配置。", "warning") : null,
-      renderAutomaticImportStatus()));
+      options, renderAutomaticImportStatus()));
 }
 
 function renderCards() {
@@ -119,18 +156,17 @@ function renderCards() {
   for (const [index, card] of cards.entries()) {
     const answer = el("details", { class: "automatic-card-answer", ...(app.automaticAnswers.has(card.id) ? { open: "" } : {}) }, el("summary", {}, "显示答案"), text("p", card.answer, "card-answer-text"));
     answer.addEventListener("toggle", () => { if (answer.open) app.automaticAnswers.add(card.id); else app.automaticAnswers.delete(card.id); });
-    for (const image of card.images || []) {
-      const media = app.data.media.find(m => m.id === image.media_id);
-      if (media && image.side !== "question") answer.append(el("figure", {}, el("img", { src: media.url, alt: image.caption || "讲义原页", loading: "lazy" }), text("figcaption", image.caption || "讲义原页", "meta")));
-    }
+    const images = CardImages.refs(card);
+    const answerGallery = CardImages.gallery(images.filter(image => image.side === "answer"), app.data.media, "答案配图");
+    if (answerGallery) answer.append(answerGallery);
     const issues = card.auto_quality?.issues || [];
     gallery.append(el("article", { class: "automatic-card", "data-card-id": card.id },
       el("div", { class: "automatic-card-top" }, text("span", `卡牌 ${index + 1} · ${card.concept}`, "meta"),
-        badge(card.approval_method === "automatic" && card.status === "approved" ? "已自动检查" : card.status === "approved" ? "已就绪" : "有疑点", card.status === "approved" ? "green" : "amber")),
-      text("h2", card.question), answer,
+        badge(isMachineApproved(card) && card.status === "approved" ? "已自动检查" : cardStatusLabel(card), card.status === "approved" ? "green" : "amber")),
+      text("h2", card.question), CardImages.gallery(images.filter(image => image.side === "question"), app.data.media, "题目配图"), AutoIllustration.create({ card, compact: true }), answer,
       issues.length ? note(issues.map(i => i.reason).join("；"), "warning") : null,
-      el("details", { class: "automatic-card-source" }, el("summary", {}, "查看来源"), ...card.evidence.map(e => text("blockquote", e.quote))),
-      button("编辑卡牌", () => { app.cardId = card.id; app.reviewFilter = documentId; setView("review"); }, "btn quiet small")));
+      el("details", { class: "automatic-card-source" }, el("summary", {}, "查看来源"), ...(card.evidence || []).map(e => text("blockquote", e.quote))),
+      button("编辑卡牌", () => { app.cardId = card.id; app.reviewDocument = documentId; app.reviewFilter = "all"; setView("review"); }, "btn quiet small")));
   }
   page.append(gallery);
   if (!cards.length) page.append(empty(activeMaterialImport(record || {}) ? "正在自动制卡…" : "这里会显示生成的卡牌",

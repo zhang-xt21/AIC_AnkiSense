@@ -68,6 +68,10 @@
 .preview-image-count { text-align: center; margin-top: 15px; }
 .settings-navigation { margin-top: 22px; }
 .workbench-mobile-tabs { display: none; }
+.studio-audit-stage .card-auto-review { margin-top: 0; border-color: #cbdcf3; background: #f4f8fe; }
+.studio-audit-stage .card-auto-review + .field { border-top: 1px solid var(--line); padding-top: 18px; }
+.studio-audit-stage .workbench-editor > .panel-body { scroll-padding-top: 12px; }
+.studio-audit-form .workbench-save-bar { border-top-color: #cbdcf3; }
 @media (max-width: 1350px) and (min-width: 981px) {
   .workbench-grid { grid-template-columns: minmax(240px, .85fr) minmax(330px, 1.3fr); }
   .workbench-source { grid-row: span 2; }
