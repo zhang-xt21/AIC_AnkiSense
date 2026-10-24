@@ -47,6 +47,8 @@ async function check(name, fn) { await fn(); results.push({ name, status: "passe
   await check("Actual static assets and settings render inside Electron", async () => {
     assert.equal(await window.evaluate(() => typeof Generation.create), "function");
     assert.equal(await window.evaluate(() => typeof CardAutoReview.create), "function");
+    assert.equal(await window.evaluate(() => typeof cancelMaterialImport), "function");
+    assert.match(await window.evaluate(() => automaticPlanLabel({ target_count: null })), /自动决定/);
     await window.locator('[data-view="settings"]').click();
     await window.getByRole("heading", { name: "模型与 API", exact: true }).waitFor();
     await window.locator('[data-view="materials"]').click();

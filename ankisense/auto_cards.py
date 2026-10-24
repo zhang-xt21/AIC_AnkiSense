@@ -159,7 +159,7 @@ class AutoCardService:
         keys = ("id", "document_id", "status", "stage", "progress", "card_ids", "issues",
                 "message", "error", "created_at", "updated_at", "options", "skipped_count",
                 "knowledge_count", "calibration", "pipeline_version", "prompt_version", "plan",
-                "rejected_cards", "rejected_count")
+                "rejected_cards", "rejected_count", "failure")
         result = {key: job.get(key) for key in keys}
         legacy_partial = (job.get("options", {}).get("autonomous") and job["status"] == "completed"
                           and any(not batch.get("status") for batch in job.get("batches", []))
@@ -299,7 +299,8 @@ class AutoCardService:
                 return self._public(job)
             if not self._public(job)["retryable"]:
                 raise HTTPException(409, "此任务无需重试；来源变化后请创建新任务。")
-            if self._configuration() != job["config"]:
+            config = self._configuration()
+            if config != job["config"] and not job.get("options", {}).get("autonomous"):
                 raise HTTPException(409, "模型或提示版本已变化，请创建新任务。")
             if job.get("options", {}).get("autonomous"):
                 signature = self._capture(job["document_id"], True)[-1]
@@ -316,6 +317,9 @@ class AutoCardService:
                 if not job["options"].get("autonomous"):
                     require_current_reviewed(self.store, [SourceBlock.model_validate(b) for b in sources])
             job.pop("retryable", None)
+            job.pop("failure", None)
+            job["config"] = config
+            job["identity"] = digest([job["document_id"], job["source_signature"], job["options"], config, PIPELINE_VERSION])
             job.update(status="pending", error=None, message="继续处理未完成的批次。", updated_at=now())
             self.store.put("auto_card_jobs", job)
             self._launch(job_id)
@@ -325,11 +329,13 @@ class AutoCardService:
         async with self.lock:
             job = self._job(job_id)
             if job["status"] in ACTIVE:
-                job.update(status="cancelled", message="任务已取消；已经保存的卡片保留。", updated_at=now())
+                job.update(status="cancelled", retryable=True, error=None, failure=None,
+                           message="任务已取消；已经保存的卡片保留，后续请求已停止。已发送的请求无法撤回。", updated_at=now())
                 self.store.put("auto_card_jobs", job)
                 task = self.tasks.get(job_id)
                 if task:
                     task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
             return self._public(job)
 
     def _update(self, job_id, **values):

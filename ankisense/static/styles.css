@@ -2838,6 +2838,9 @@ main {
 .automatic-import-options { margin: 16px 0; }
 .automatic-import-options > summary { cursor: pointer; color: var(--teal); margin-bottom: 14px; }
 .automatic-import-options .field { max-width: 360px; }
+.automatic-import-failure { flex-basis: 100%; }
+.automatic-import-actions { flex-basis: 100%; }
+.automatic-import-actions .helper { max-width: 70ch; }
 .automatic-card .auto-illustration { font-size: 12px; }
 
 .studio-ai-batch-status { margin: 14px 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }

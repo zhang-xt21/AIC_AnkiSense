@@ -32,8 +32,9 @@ from .schemas import CardDraft, Diagnosis, DraftBatch, PlannedDraftBatch, Source
 class AIError(RuntimeError):
     """A safe, user-visible error that never includes request data or credentials."""
 
-    def __init__(self, message: str):
+    def __init__(self, message: str, *, code: str | None = None):
         self.message = message
+        self.code = code
         super().__init__(message)
 
 
@@ -677,18 +678,24 @@ text 给出可引用的全文，按原页文本行换行，不添加标题或解
                 )
                 response.raise_for_status()
         except httpx.TimeoutException:
-            raise AIError("模型调用超时，请稍后重试。") from None
+            raise AIError("模型调用超时，请稍后重试。", code="timeout") from None
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             if status in {401, 403}:
                 message = "模型服务拒绝访问，请检查 API Key 和模型权限。"
+                code = "authentication"
             elif status == 429:
                 message = "模型服务额度不足或请求过于频繁，请检查额度后重试。"
+                code = "rate_limit"
+            elif 400 <= status < 500 or 300 <= status < 400:
+                message = "模型接口或请求配置不兼容，请检查接口地址、模型名称及图片输入支持。"
+                code = "configuration"
             else:
                 message = "模型服务暂时不可用，请检查模型配置或稍后重试。"
-            raise AIError(message) from None
+                code = "unavailable"
+            raise AIError(message, code=code) from None
         except (httpx.RequestError, httpx.InvalidURL):
-            raise AIError("无法连接模型服务，请检查网络与接口地址后重试。") from None
+            raise AIError("无法连接模型服务，请检查网络与接口地址后重试。", code="connection") from None
         try:
             body = response.json()
             choice = body["choices"][0]

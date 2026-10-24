@@ -1,6 +1,7 @@
 """One upload starts the complete local import and cloud card pipeline."""
 import asyncio
 import hashlib
+import threading
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -13,10 +14,15 @@ from .sources import page_records
 MAX_FILE = 50 * 1024 * 1024
 
 
+class ImportCancelled(Exception):
+    """Cooperatively stop the local parser at its next page boundary."""
+
+
 class AutomaticImportService:
     def __init__(self, store, storage, cards):
         self.store, self.storage, self.cards = store, storage, cards
         self.tasks = {}
+        self.stops = {}
         self.queue = asyncio.Lock()
         self.lock = asyncio.Lock()
         self.router = APIRouter()
@@ -24,6 +30,7 @@ class AutomaticImportService:
         self.router.add_api_route("/api/material-imports", self.list, methods=["GET"])
         self.router.add_api_route("/api/material-imports/{identifier}", self.get, methods=["GET"])
         self.router.add_api_route("/api/material-imports/{identifier}/retry", self.retry, methods=["POST"])
+        self.router.add_api_route("/api/material-imports/{identifier}/cancel", self.cancel, methods=["POST"])
 
     def public(self, record):
         result = {k: record.get(k) for k in ("id", "filename", "status", "message", "progress", "document_id", "job_id", "error", "created_at", "updated_at", "options", "attempt")}
@@ -34,6 +41,7 @@ class AutomaticImportService:
             result["error"] = result["job"].get("error")
             result["progress"] = result["job"].get("progress")
             result["plan"] = result["job"].get("plan")
+            result["failure"] = result["job"].get("failure")
         result["retryable"] = (result.get("job") or {}).get("retryable", result["status"] in {"partial", "failed", "cancelled", "awaiting_confirmation", "interrupted"})
         return result
 
@@ -106,12 +114,35 @@ class AutomaticImportService:
                 self.launch(identifier)
             return self.public(self.store.get("material_imports", identifier))
 
+    async def cancel(self, identifier: str):
+        async with self.lock:
+            record = self.store.get("material_imports", identifier)
+            if not record:
+                raise HTTPException(404, "导入任务不存在。")
+            if record.get("job_id"):
+                await self.cards.cancel(record["job_id"])
+            elif record["status"] in ACTIVE:
+                self.update(identifier, status="cancelled", error=None,
+                            message="已取消后续处理；上传文件保留，可重新继续。当前页识别或转换可能仍在结束。")
+                if stop := self.stops.get(identifier):
+                    stop.set()
+                if task := self.tasks.get(identifier):
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            return self.public(self.store.get("material_imports", identifier))
+
     def launch(self, identifier):
         if identifier in self.tasks and not self.tasks[identifier].done():
             return
-        task = asyncio.create_task(self.run(identifier))
+        stop = threading.Event()
+        self.stops[identifier] = stop
+        task = asyncio.create_task(self.run(identifier, stop))
         self.tasks[identifier] = task
-        task.add_done_callback(lambda completed: self.tasks.pop(identifier, None) if self.tasks.get(identifier) is completed else None)
+        def done(completed):
+            if self.tasks.get(identifier) is completed:
+                self.tasks.pop(identifier, None)
+                self.stops.pop(identifier, None)
+        task.add_done_callback(done)
 
     def recover(self):
         for record in self.store.all("material_imports"):
@@ -124,7 +155,7 @@ class AutomaticImportService:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def run(self, identifier):
+    async def run(self, identifier, stop):
         async with self.queue:
             try:
                 record = self.store.get("material_imports", identifier)
@@ -138,7 +169,13 @@ class AutomaticImportService:
                 else:
                     content = await asyncio.to_thread(path.read_bytes)
                 def progress(completed, total):
-                    self.update(identifier, progress={"completed": completed, "total": total}, message=f"正在识别讲义 {completed}/{total} 页。")
+                    def build():
+                        record = self.store.get("material_imports", identifier)
+                        if stop.is_set() or record["status"] not in ACTIVE:
+                            raise ImportCancelled()
+                        return [("material_imports", {**record, "progress": {"completed": completed, "total": total},
+                            "message": f"正在识别讲义 {completed}/{total} 页。", "updated_at": now()})]
+                    self.store.mutate(build)
                 result = await asyncio.to_thread(parse_pdf_document, content, max_pages=500, max_characters=1000000, progress=progress)
                 doc_id = "pdf-" + hashlib.sha256((identifier + ":automatic-v1").encode()).hexdigest()[:24]
                 uploads = self.storage / "uploads"
@@ -164,7 +201,11 @@ class AutomaticImportService:
                     count=options.get("count"), image_mode="source_page" if options.get("auto_images", True) else "off", autonomous=True))
                 self.update(identifier, job_id=job["id"], status="completed", message="已开始自动制卡。")
             except asyncio.CancelledError:
-                self.update(identifier, status="pending", message="服务恢复后会自动继续。")
+                stop.set()
+                if self.store.get("material_imports", identifier)["status"] in ACTIVE:
+                    self.update(identifier, status="pending", message="服务恢复后会自动继续本地识别。")
+            except ImportCancelled:
+                pass
             except Exception as error:
                 message = error.detail if isinstance(error, HTTPException) else str(error) if isinstance(error, ValueError) else "讲义导入未完成，请检查文件后重新导入。"
                 self.update(identifier, status="failed", error=message, message=message)

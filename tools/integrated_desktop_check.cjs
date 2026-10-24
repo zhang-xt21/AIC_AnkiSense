@@ -11,6 +11,7 @@ const directory = path.join(project, ".ui-checks", "integrated-desktop", new Dat
 fs.mkdirSync(directory, { recursive: true });
 const results = [], errors = [], writes = [];
 let uploaded = false, retried = false, backendVersion = 1, pending = false;
+let controlStatus = null, controlFailure = null, cancelFails = false, hasCards = true;
 const doc = { id: "pdf-integrated", title: "整合示例", filename: "fixture.pdf" };
 const media = ["front", "back"].map(id => ({ id, url: `/api/card-media/${id}/file`, source: { origin: "manual" } }));
 function card(id, legacy = false) {
@@ -21,10 +22,12 @@ function card(id, legacy = false) {
 }
 function state() { return { mode: "cloud", configured: true, model: "isolated-fixture", image_check: { available: false },
   documents: uploaded ? [doc, { id: "demo-only", title: "隐藏的演示", is_demo: true }] : [],
-  cards: uploaded ? [card("machine-card"), card("legacy-card", true), { ...card("demo-card"), document_id: "demo-only", is_demo: true }] : [],
+  cards: uploaded && hasCards ? [card("machine-card"), card("legacy-card", true), { ...card("demo-card"), document_id: "demo-only", is_demo: true }] : [],
   blocks: uploaded ? [{ block_id: "block1", document_id: doc.id, page: 1, text: "栈遵循后进先出" }] : [], source_pages: [], source_proposals: [], generation_jobs: [], media, attempts: [] }; }
-function imports() { return uploaded ? [{ id: "import-fixture", filename: doc.filename, document_id: doc.id, status: retried ? "completed" : "partial", retryable: !retried,
-  message: retried ? "制卡完成" : "已保留有效卡片，剩余批次可补跑", job: { card_ids: ["machine-card", "legacy-card"], progress: { completed: retried ? 2 : 1, total: 2 } } }] : []; }
+function imports() { return uploaded ? [{ id: "import-fixture", filename: doc.filename, document_id: doc.id, status: controlStatus || (retried ? "completed" : "partial"), retryable: controlStatus ? controlStatus !== "running" : !retried,
+  failure: controlFailure, plan: { recommended_count: 85, target_count: null, total_batches: 67 },
+  message: retried ? "制卡完成" : "已保留有效卡片，剩余批次可补跑", job: { card_ids: hasCards ? ["machine-card", "legacy-card"] : [], progress: { completed: retried ? 2 : 1, total: 2 },
+  issues: controlFailure ? [...Array.from({ length: 2000 }, () => ({ code: "critical_number", reason: "数字需留意", page: 1 })), { code: "batch_failed", reason: "无法连接模型服务", pages: [2] }] : [] } }] : []; }
 function json(response, value, status = 200) { response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" }); response.end(JSON.stringify(value)); }
 const server = http.createServer(async (request, response) => {
   const pathname = new URL(request.url, "http://localhost").pathname;
@@ -32,6 +35,11 @@ const server = http.createServer(async (request, response) => {
   if (pathname === "/api/state") return json(response, state());
   if (pathname === "/api/material-imports" && request.method === "POST") { let body = ""; for await (const chunk of request) body += chunk; writes.push({ path: pathname, body }); uploaded = true; return json(response, imports()[0]); }
   if (pathname === "/api/material-imports/import-fixture/retry") { writes.push({ path: pathname }); retried = true; return json(response, imports()[0]); }
+  if (pathname === "/api/material-imports/import-fixture/cancel") {
+    writes.push({ path: pathname });
+    if (cancelFails) { cancelFails = false; return json(response, { detail: "offline cancel fixture" }, 500); }
+    controlStatus = "cancelled"; return json(response, imports()[0]);
+  }
   if (pathname === "/api/material-imports") return json(response, { imports: imports() });
   if (pathname.endsWith("/auto-review")) return json(response, { status: pending ? "running" : "auto_pass", current: true, checks: [], reasons: [], card: card(pathname.split("/")[3], pathname.includes("legacy")) });
   if (pathname.endsWith("/generation-plan")) return json(response, { target_count: 2, recommended_count: 2, warnings: [], outline: [], source_fingerprint: "fixture", stats: { batch_count: 1, coverage_ratio: 1 } });
@@ -101,6 +109,44 @@ async function check(name, fn) { await fn(); results.push({ name, status: "passe
     await page.locator('[data-view="cards"]').first().click();
     for (const width of [960, 390]) { await page.setViewportSize({ width, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true); }
     await page.screenshot({ path: path.join(directory, "mobile.png"), fullPage: true });
+  });
+  await check("Cancellation stops the selected task and preserves saved cards", async () => {
+    controlStatus = "running";
+    await page.evaluate(() => loadMaterialImports());
+    await page.getByRole("button", { name: "取消处理", exact: true }).click();
+    await page.getByText("已取消，可继续", { exact: true }).waitFor();
+    assert.equal(await page.locator(".automatic-card").count(), 2);
+    assert.equal(await page.getByRole("button", { name: "继续未完成部分", exact: true }).isEnabled(), true);
+    assert.equal(writes.filter(item => item.path.endsWith("/cancel")).length, 1);
+  });
+  await check("Failed cancellation does not falsely claim that processing stopped", async () => {
+    controlStatus = "running"; cancelFails = true;
+    await page.evaluate(() => loadMaterialImports());
+    await page.getByRole("button", { name: "取消处理", exact: true }).click();
+    await page.getByText(/取消未完成：.*offline cancel fixture/).waitFor();
+    assert.equal(await page.getByRole("button", { name: "取消处理", exact: true }).isEnabled(), true);
+    assert.equal(await page.getByText("已取消，可继续", { exact: true }).count(), 0);
+    await page.getByRole("button", { name: "取消处理", exact: true }).click();
+    await page.getByText("已取消，可继续", { exact: true }).waitFor();
+  });
+  await check("Service errors explain recovery, quantities never show null and repeated signals are grouped", async () => {
+    controlStatus = "failed"; hasCards = false;
+    controlFailure = { code: "connection", message: "无法连接模型服务", action: "检查网络与模型设置后继续。" };
+    await page.evaluate(() => loadMaterialImports());
+    await page.getByRole("alert").filter({ hasText: "无法连接模型服务" }).waitFor();
+    assert.match(await page.locator(".automatic-import-failure").innerText(), /已保留 0 张卡片/);
+    assert.doesNotMatch(await page.locator(".automatic-import-plan").innerText(), /null|undefined/);
+    assert.equal(await page.locator("#automatic-import-status progress").count(), 0);
+    await page.getByText("本次尚未成功保存卡片", { exact: true }).waitFor();
+    await page.getByText("处理说明（2 类）", { exact: true }).click();
+    assert.equal(await page.locator(".automatic-processing-notes > p").count(), 3);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);
+    await page.screenshot({ path: path.join(directory, "failure-mobile.png"), fullPage: true });
+    await page.setViewportSize({ width: 1280, height: 860 });
+    await page.screenshot({ path: path.join(directory, "failure-desktop.png"), fullPage: true });
+    await page.getByRole("button", { name: "检查模型设置", exact: true }).click();
+    assert.equal(await page.evaluate(() => app.view), "settings");
+    assert.equal(writes.filter(item => item.path === "/api/material-imports").length, 1);
   });
   assert.deepEqual(errors, []);
   fs.writeFileSync(path.join(directory, "report.json"), JSON.stringify({ results, errors, writes: writes.map(item => item.path) }, null, 2));

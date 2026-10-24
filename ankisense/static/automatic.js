@@ -2,12 +2,44 @@
 
 function initializeAutomaticWorkspace() {
   clearTimeout(app.importTimer);
-  Object.assign(app, { materialImports: [], materialImportId: null, importBusy: false, importError: "", importTimer: null, automaticAnswers: new Set(), importPreferences: { count: "", autoImages: true }, importRetrying: null });
+  Object.assign(app, { materialImports: [], materialImportId: null, importBusy: false, importError: "", importTimer: null, automaticAnswers: new Set(), importPreferences: { count: "", autoImages: true }, importRetrying: null, importCancelling: null, importCancelErrors: {} });
   viewNames.cards = "卡牌结果";
 }
 
 function activeMaterialImport(record) { return ["pending", "running"].includes(record.status); }
 function selectedMaterialImport() { return app.materialImports.find(r => r.id === app.materialImportId) || app.materialImports.find(r => r.document_id === app.documentId); }
+
+function automaticPlanLabel(plan) {
+  const parts = [];
+  if (Number.isInteger(plan.recommended_count)) parts.push(`系统建议 ${plan.recommended_count} 张`);
+  parts.push(Number.isInteger(plan.target_count) ? `本次目标 ${plan.target_count} 张` : "本次按材料自动决定数量");
+  if (plan.total_batches) parts.push(`共 ${plan.total_batches} 批`);
+  return parts.join(" · ");
+}
+
+function automaticFailure(record) {
+  if (activeMaterialImport(record) || ["completed", "cancelled"].includes(record.status)) return null;
+  if (record.failure || record.job?.failure) return record.failure || record.job.failure;
+  // Older installed versions only persisted safe messages, without error codes.
+  const messages = [record.error, record.job?.error];
+  if (record.status === "failed" && !record.job?.card_ids?.length) messages.push(...(record.job?.issues || []).filter(issue => issue.code === "batch_failed").map(issue => issue.reason));
+  const message = messages.filter(Boolean).find(value => /无法连接.*模型|模型.*超时|模型服务.*不可用|API Key|模型服务.*额度|模型接口.*配置/.test(value));
+  return message ? { code: "model_service", message, action: "先检查模型设置、网络和额度，再继续未完成部分。" } : null;
+}
+
+function summarizeAutomaticIssues(issues) {
+  const groups = new Map();
+  for (const issue of issues) {
+    const reason = issue.reason || "处理时发现待核对内容。";
+    const key = `${issue.code || "other"}:${reason}`;
+    if (!groups.has(key)) groups.set(key, { code: issue.code, reason, count: 0, pages: new Set() });
+    const group = groups.get(key);
+    group.count += 1;
+    for (const page of issue.pages || (issue.page ? [issue.page] : [])) group.pages.add(page);
+  }
+  return [...groups.values()].sort((a, b) => Number(b.code === "batch_failed" || b.code === "card_failed") - Number(a.code === "batch_failed" || a.code === "card_failed"))
+    .map(group => ({ ...group, pages: [...group.pages].sort((a, b) => a - b) }));
+}
 
 async function loadMaterialImports(initial = false) {
   try {
@@ -48,7 +80,7 @@ async function loadMaterialImports(initial = false) {
 }
 
 async function retryMaterialImport(record) {
-  if (app.importRetrying || activeMaterialImport(record)) return;
+  if (app.importRetrying || app.importCancelling || activeMaterialImport(record)) return;
   app.importRetrying = record.id;
   try {
     const updated = await api(`/api/material-imports/${encodeURIComponent(record.id)}/retry`, { method: "POST" });
@@ -62,23 +94,46 @@ async function retryMaterialImport(record) {
   finally { app.importRetrying = null; render(); }
 }
 
+async function cancelMaterialImport(record) {
+  if (app.importCancelling || app.importRetrying || !activeMaterialImport(record)) return;
+  app.importCancelling = record.id;
+  delete app.importCancelErrors[record.id];
+  render();
+  try {
+    const updated = await api(`/api/material-imports/${encodeURIComponent(record.id)}/cancel`, { method: "POST" });
+    app.materialImports = app.materialImports.map(item => item.id === updated.id ? updated : item);
+    await refresh();
+    await loadMaterialImports();
+  } catch (error) { app.importCancelErrors[record.id] = `取消未完成：${error.message}。任务可能仍在处理，请重试取消。`; }
+  finally { app.importCancelling = null; render(); }
+}
+
 function renderAutomaticImportStatus() {
   const box = el("div", { id: "automatic-import-status", "aria-live": "polite" });
   if (app.importError) box.append(note(app.importError, "warning"));
   for (const record of app.materialImports.slice(0, 6)) {
     const job = record.job;
+    const failure = automaticFailure(record);
     const progress = job?.progress || record.progress;
     const row = el("article", { class: "automatic-import-row", "data-import-status": record.status },
       el("div", {}, text("strong", record.filename), text("p", record.message || "正在准备…", "meta")),
-      badge(({ pending: "等待处理", running: "自动处理中", completed: "已完成", partial: "部分完成", failed: "未完成", cancelled: "已停止", interrupted: "已中断，可继续", outdated: "来源已更新", awaiting_confirmation: "需要处理" })[record.status] || "处理详情", activeMaterialImport(record) ? "blue" : record.status === "completed" ? "green" : "amber"));
-    if (progress?.total) row.append(el("progress", { max: progress.total, value: progress.completed, "aria-label": `${record.filename}处理进度` }));
+      badge(failure ? "模型异常，已停止" : ({ pending: "等待处理", running: "自动处理中", completed: "已完成", partial: "部分完成", failed: "未完成", cancelled: "已取消，可继续", interrupted: "已中断，可继续", outdated: "来源已更新", awaiting_confirmation: "需要处理" })[record.status] || "处理详情", activeMaterialImport(record) ? "blue" : record.status === "completed" ? "green" : "amber"));
+    if (app.importCancelErrors[record.id]) row.append(note(app.importCancelErrors[record.id], "warning"));
+    if (progress?.total) {
+      if (activeMaterialImport(record) || record.status === "completed") row.append(el("progress", { max: progress.total, value: progress.completed, "aria-label": `${record.filename}处理进度` }));
+      row.append(text("p", `${job ? "已处理批次" : "已识别页面"} ${progress.completed}/${progress.total}${record.status !== "completed" ? "，进度不代表制卡成功" : ""}`, "helper"));
+    }
     if (record.plan) {
       const plan = record.plan;
-      row.append(text("p", `系统建议 ${plan.recommended_count} 张 · 本次目标 ${plan.target_count} 张${plan.total_batches ? ` · 分 ${plan.total_batches} 批处理` : ""}`, "helper automatic-import-plan"));
+      row.append(text("p", automaticPlanLabel(plan), "helper automatic-import-plan"));
       if (plan.suggestion_reason) row.append(text("p", plan.suggestion_reason, "helper"));
     }
     if (job?.card_ids?.length) row.append(text("span", `${job.card_ids.length} 张卡牌已生成`, "meta"));
-    if (record.error || job?.error) row.append(note(record.error || job.error, "warning"));
+    if (failure) row.append(el("div", { class: "notice warning automatic-import-failure", role: "alert" },
+      text("strong", "模型服务异常，尚未处理的内容已停止"), text("p", failure.message),
+      text("p", `已保留 ${job?.card_ids?.length || 0} 张卡片及原文件。${failure.action || "检查模型设置后，可继续未完成部分。"}`),
+      button("检查模型设置", () => setView("settings"), "btn secondary small")));
+    else if (record.error || job?.error) row.append(note(record.error || job.error, "warning"));
     row.append(button("查看卡牌", () => {
       app.materialImportId = record.id;
       history.replaceState(null, "", `?import=${encodeURIComponent(record.id)}`);
@@ -86,7 +141,10 @@ function renderAutomaticImportStatus() {
       setView("cards");
     }, "btn secondary small"));
     const retryable = record.retryable ?? ["failed", "partial", "cancelled", "interrupted"].includes(record.status);
-    if (retryable) row.append(button(app.importRetrying === record.id ? "正在补跑…" : record.status === "interrupted" ? "继续未完成部分" : "重试未完成部分", () => retryMaterialImport(record), "btn secondary small", Boolean(app.importRetrying)));
+    if (activeMaterialImport(record)) row.append(el("div", { class: "automatic-import-actions" },
+      button(app.importCancelling === record.id ? "正在取消…" : "取消处理", () => cancelMaterialImport(record), "btn secondary small", Boolean(app.importCancelling || app.importRetrying)),
+      text("p", "取消后保留已保存卡片，停止后续处理；已经发送的模型请求无法撤回。", "helper")));
+    if (retryable) row.append(button(app.importRetrying === record.id ? "正在补跑…" : ["interrupted", "cancelled"].includes(record.status) ? "继续未完成部分" : "重试未完成部分", () => retryMaterialImport(record), "btn secondary small", Boolean(app.importRetrying || app.importCancelling)));
     box.append(row);
   }
   return box;
@@ -141,8 +199,9 @@ function renderCards() {
   const record = selectedMaterialImport();
   const documentId = record ? record.document_id : app.documentId;
   const cards = app.data.cards.filter(c => c.document_id === documentId && c.status !== "rejected" && !c.source_outdated);
+  const readyCount = cards.filter(card => card.status === "approved").length;
   const page = el("div", {}, heading("卡牌结果", documentFor(documentId)?.title || record?.filename || "你的学习卡牌",
-    activeMaterialImport(record || {}) ? "系统正在自动处理，生成的卡牌会陆续出现在这里。" : `已生成 ${cards.length} 张卡牌。可以直接阅读、练习或导出。`,
+    activeMaterialImport(record || {}) ? "系统正在自动处理，生成的卡牌会陆续出现在这里。" : cards.length ? `已保存 ${cards.length} 张卡牌，${readyCount} 张可练习和导出。` : record ? "尚未保存可用卡片，请查看下方处理状态与说明。" : "导入讲义后，可在这里查看卡片。",
     [button("导入其他讲义", () => setView("materials"), "btn secondary"),
       button("开始练习", () => { app.practiceId = cards.find(c => c.status === "approved")?.id || null; setView("practice"); }, "btn", !cards.some(c => c.status === "approved")),
       button("导出至 Anki", () => setView("export"), "btn secondary", !cards.some(c => c.status === "approved"))]));
@@ -169,10 +228,16 @@ function renderCards() {
       button("编辑卡牌", () => { app.cardId = card.id; app.reviewDocument = documentId; app.reviewFilter = "all"; setView("review"); }, "btn quiet small")));
   }
   page.append(gallery);
-  if (!cards.length) page.append(empty(activeMaterialImport(record || {}) ? "正在自动制卡…" : "这里会显示生成的卡牌",
-    activeMaterialImport(record || {}) ? "无需操作，页面会自动更新。整份讲义需要一些时间。" : "导入讲义后，系统会自动处理并显示结果。", activeMaterialImport(record || {}) ? null : button("导入讲义", () => setView("materials"))));
+  if (!cards.length) page.append(empty(activeMaterialImport(record || {}) ? "正在自动制卡…" : record?.status === "cancelled" ? "本次处理已取消" : record && record.status !== "completed" ? "本次尚未成功保存卡片" : "这里会显示生成的卡牌",
+    activeMaterialImport(record || {}) ? "无需操作，页面会自动更新。整份讲义需要一些时间。" : record && record.status !== "completed" ? "请查看上方处理原因；原文件已保留，无需重新上传。" : "导入讲义后，系统会自动处理并显示结果。", record ? null : button("导入讲义", () => setView("materials"))));
   const issues = record?.job?.issues || [];
-  if (issues.length) page.append(el("details", { class: "automatic-processing-notes" }, el("summary", {}, `处理说明（${issues.length}）`),
-    ...issues.map(i => text("p", `${i.pages?.length ? `第 ${i.pages.join("、")} 页：` : ""}${i.reason}`))));
+  if (issues.length) {
+    const groups = summarizeAutomaticIssues(issues);
+    page.append(el("details", { class: "automatic-processing-notes" }, el("summary", {}, `处理说明（${groups.length} 类）`),
+      text("p", `${issues.length} 条记录已按原因合并；数字、公式等本机提示仅表示需要留意，不代表已确认错误。`, "helper"),
+      ...groups.map(group => text("p", `${group.reason}（${group.count} 条${group.pages.length ? `，第 ${group.pages.slice(0, 8).join("、")}${group.pages.length > 8 ? ` 等 ${group.pages.length}` : ""} 页` : ""}）`))));
+  }
   return page;
 }
+
+if (typeof module !== "undefined" && module.exports) module.exports = { automaticPlanLabel, automaticFailure, summarizeAutomaticIssues };

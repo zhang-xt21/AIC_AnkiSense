@@ -331,7 +331,7 @@ def test_invalid_planned_batch_envelope_remains_an_error(monkeypatch, blocks, pa
         asyncio.run(service.generate_drafts(blocks, 2, allow_fewer=True))
 
 
-@pytest.mark.parametrize("status", [302, 401, 403, 429, 500])
+@pytest.mark.parametrize("status", [302, 400, 401, 403, 404, 429, 500])
 def test_cloud_http_failures_are_safe_and_not_retried(monkeypatch, card, blocks, status):
     calls = []
 
@@ -344,6 +344,8 @@ def test_cloud_http_failures_are_safe_and_not_retried(monkeypatch, card, blocks,
         asyncio.run(service.diagnose_answer(card, blocks, "后进先出"))
     assert "test-secret-key" not in caught.value.message
     assert "sensitive" not in caught.value.message
+    assert caught.value.code == ({401: "authentication", 403: "authentication", 429: "rate_limit"}.get(status)
+                                 or ("configuration" if status < 500 else "unavailable"))
     assert len(calls) == 1
 
 
@@ -375,6 +377,7 @@ def test_cloud_timeout_has_safe_message(monkeypatch, card, blocks):
     with pytest.raises(AIError, match="超时") as caught:
         asyncio.run(service.diagnose_answer(card, blocks, "后进先出"))
     assert "test-secret-key" not in str(caught.value)
+    assert caught.value.code == "timeout"
 
 
 def test_settings_preserve_existing_environment(monkeypatch):

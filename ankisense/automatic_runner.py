@@ -18,12 +18,22 @@ from .prompts import AUTO_CARD_PROMPT_VERSION
 from .schemas import SourceBlock
 
 
-async def retry_call(operation):
+SERVICE_ERRORS = {"connection", "timeout", "unavailable", "authentication", "configuration", "rate_limit"}
+STOP_IMMEDIATELY = {"authentication", "configuration", "rate_limit"}
+
+
+class ModelServiceStopped(RuntimeError):
+    def __init__(self, error):
+        self.error = error
+
+
+async def retry_call(operation, on_failure):
     for attempt in range(2):
         try:
             return await operation()
-        except AIError:
-            if attempt:
+        except AIError as error:
+            on_failure(error)
+            if attempt or error.code in STOP_IMMEDIATELY:
                 raise
             await asyncio.sleep(.5)
 
@@ -73,8 +83,26 @@ def _save(service, job_id, focus, signature, checkpoint, records=(), issues=()):
 
 
 async def run_automatic(service, job_id, ai):
+    consecutive_failures = 0
+
     def check(blocks=()):
         service._check(job_id, blocks, signature)
+
+    async def call_model(operation):
+        nonlocal consecutive_failures
+        check()
+        def failed(error):
+            nonlocal consecutive_failures
+            if error.code in SERVICE_ERRORS:
+                consecutive_failures += 1
+                if error.code in STOP_IMMEDIATELY or consecutive_failures >= 3:
+                    raise ModelServiceStopped(error) from None
+            else:
+                consecutive_failures = 0
+        result = await retry_call(operation, failed)
+        consecutive_failures = 0
+        check()
+        return result
 
     try:
         job = service._job(job_id)
@@ -126,7 +154,7 @@ async def run_automatic(service, job_id, ai):
                 if checkpoint["knowledge"]:
                     points = [KnowledgePoint.model_validate(point) for point in checkpoint["knowledge"]]
                 else:
-                    points = (await retry_call(lambda: ai.extract_knowledge_visual(focus, [block.block_id for block in focus], images, numbers))).points
+                    points = (await call_model(lambda: ai.extract_knowledge_visual(focus, [block.block_id for block in focus], images, numbers))).points
                     points = points[:min(quota or 6, limit - len(job["card_ids"]))]
                     checkpoint["knowledge"] = [point.model_dump() for point in points]
                     _save(service, job_id, focus, signature, checkpoint)
@@ -143,7 +171,7 @@ async def run_automatic(service, job_id, ai):
                     records, issues = [], []
                     try:
                         generate = getattr(ai, "generate_knowledge_cards_partial", None) or ai.generate_knowledge_cards
-                        generated = await retry_call(lambda: generate(focus, selected))
+                        generated = await call_model(lambda: generate(focus, selected))
                         raw = [item.model_dump() if hasattr(item, "model_dump") else item for item in generated.cards]
                         selection = select_knowledge_drafts(raw, focus, selected)
                         rejected_by_point = {}
@@ -157,7 +185,7 @@ async def run_automatic(service, job_id, ai):
                         if cards:
                             service._update(job_id, stage="quality", message=f"正在对照原页检查 {len(cards)} 张候选卡片。")
                             review = getattr(ai, "review_cards_visual_semantic", None) or ai.review_cards_visual
-                            reports = await retry_call(lambda: review([item.card for item in cards], focus, images, numbers))
+                            reports = await call_model(lambda: review([item.card for item in cards], focus, images, numbers))
                             if len(reports) != len(cards):
                                 raise AIError("原页审核结果没有完整覆盖本批候选。")
                             for item, report in zip(cards, reports):
@@ -168,9 +196,9 @@ async def run_automatic(service, job_id, ai):
                                     repairs = 0
                                     if report.issues:
                                         try:
-                                            repaired = await retry_call(lambda: ai.repair_card(card, focus, report))
+                                            repaired = await call_model(lambda: ai.repair_card(card, focus, report))
                                             validate_card(repaired, focus)
-                                            checked = await retry_call(lambda: ai.review_card_visual(repaired, focus, images, numbers))
+                                            checked = await call_model(lambda: ai.review_card_visual(repaired, focus, images, numbers))
                                             validate_quality_report(checked, repaired, focus)
                                             card, report = repaired, checked
                                         except (AIError, ValueError):
@@ -248,6 +276,18 @@ async def run_automatic(service, job_id, ai):
             error="部分内容未处理成功，可显式重试剩余候选。" if failures else None,
             message=f"已保存 {count} 张卡片。" + ("部分内容未完成，可重试补跑。" if failures else
                 "原文中可独立制卡的有效知识不足或出现重复，实际数量少于目标；没有为凑数添加内容。" if short else ""))
+    except ModelServiceStopped as stopped:
+        # Model-service failure is separate from a bad page or invalid candidate.
+        # Stop issuing requests, but keep all completed checkpoints for explicit retry.
+        current = service._job(job_id)
+        if current["status"] in ACTIVE:
+            count = len(current["card_ids"])
+            failure = {"code": stopped.error.code, "message": stopped.error.message,
+                       "action": "检查模型设置、网络或额度后，再点击继续；仅处理未完成内容。"}
+            current.update(status="partial" if count else "failed", retryable=True, failure=failure,
+                           error=stopped.error.message,
+                           message=f"模型服务异常，已停止后续请求；已保存 {count} 张卡片。", updated_at=now())
+            service.store.put("auto_card_jobs", current)
     except asyncio.CancelledError:
         current = service._job(job_id)
         if current["status"] in ACTIVE:
