@@ -1,18 +1,96 @@
 "use strict";
 
 const $ = (selector, root = document) => root.querySelector(selector);
-const app = { data: null, view: "materials", uploadTab: "pdf", documentId: null, cardId: null, cardDrafts: {}, cardEditBusy: null, cardEditErrors: {}, practiceId: null, practiceFilter: "all", practiceLoadedKey: null, practiceDrafts: {}, selectedBlocks: new Set(), reviewFilter: "all", attempt: null, answer: "", busy: false, sourcePage: {}, proofDrafts: {}, proofBusy: null, proofErrors: {} };
-const viewNames = { materials: "学习材料", review: "制卡工作台", practice: "开始练习", export: "导出至 Anki", settings: "模型设置" };
+const app = { data: null, view: "materials", studioStage: "source", showImport: false, proofOpen: {}, uploadTab: "pdf", documentId: null, cardId: null, cardDrafts: {}, cardEditBusy: null, cardEditErrors: {}, practiceId: null, practiceFilter: "all", practiceLoadedKey: null, practiceDrafts: {}, selectedBlocks: new Set(), reviewFilter: "all", attempt: null, answer: "", busy: false, sourcePage: {}, proofDrafts: {}, proofBusy: null, proofErrors: {}, aiProofBusy: null, aiProofErrors: {}, aiProofBatch: null };
+const viewNames = { materials: "讲义制卡", review: "讲义制卡", practice: "开始练习", export: "导出至 Anki", settings: "模型设置" };
 const verdictNames = { correct: "回答正确", incomplete: "还不完整", incorrect: "需要修正", uncertain: "暂时无法判断" };
 const verdictColors = { correct: "green", incomplete: "amber", incorrect: "red", uncertain: "blue" };
-const statusNames = { draft: "待审核", approved: "已批准", rejected: "已拒绝" };
-const pageStatusNames = { pending: "待校对", reviewed: "已校对", empty: "已确认空白", failed: "识别失败" };
+const statusNames = { draft: "待处理", approved: "可学习", rejected: "已拒绝" };
+const pageStatusNames = { pending: "已提取", reviewed: "已人工核对", empty: "已确认空白", failed: "识别失败" };
+function cardStatusLabel(card) {
+  if (card.status === "approved") return card.approval?.method === "machine" ? "机器审核通过" : "人工批准";
+  if (AutoIllustration.active(card)) return AutoIllustration.describe(card).label;
+  if (card.review_state === "queued") return "等待自动检查";
+  if (card.review_state === "running") return "正在自动检查";
+  return statusNames[card.status] || "待处理";
+}
+const automaticReviewNotice = "生成或保存后会自动检查，将相关文字、必要配图及其原页发送至当前配置的模型 API，会消耗 API 额度。检查通过即可学习；有疑点或检查失败时保留草稿供你处理。";
 function sourcePageStatus(page) { return page.status === "empty" && !page.reviewed_at ? "未识别到文字" : pageStatusNames[page.status] || page.status; }
 function sourcePageConfirmed(page) { return page.status === "reviewed" || (page.status === "empty" && Boolean(page.reviewed_at)); }
 const proofStorageKey = "ankisense-proofreading-drafts-v1";
 const practiceStorageKey = "ankisense-practice-drafts-v1";
 const practiceFilterNames = { all: "全部", uncompleted: "未完成", completed: "已完成" };
 let toastTimer;
+let reviewPollTimer;
+let reviewPollFailures = 0;
+app.generationPreferences = {};
+app.customGenerationScope = {};
+function generationJobFor(documentId) {
+  const jobs = (app.data?.generation_jobs || []).filter(job => job.document_id === documentId);
+  return jobs.find(Generation.active) || jobs.slice().sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+}
+function rememberGenerationJob(job) {
+  app.data.generation_jobs = (app.data.generation_jobs || []).filter(item => item.id !== job.id).concat(job);
+  scheduleReviewPoll();
+}
+function hasPendingGeneration() { return (app.data?.generation_jobs || []).some(Generation.active); }
+function hasPendingReviews() { return app.data?.cards.some(card => ["queued", "running"].includes(card.review_state)); }
+function hasPendingIllustrations() { return (app.data?.cards || []).some(AutoIllustration.active); }
+function approvedCardIds() { return (app.data?.cards || []).filter(card => card.status === "approved").map(card => `${card.id}:${card.version}`).sort().join("|"); }
+function scheduleReviewPoll() {
+  clearTimeout(reviewPollTimer);
+  if (hasPendingReviews() || hasPendingGeneration() || hasPendingIllustrations()) reviewPollTimer = setTimeout(pollReviewProgress, Math.min(1500 * 2 ** reviewPollFailures, 30000));
+}
+function updateReviewIndicators() {
+  const current = app.data.cards.find(card => card.id === app.cardId);
+  const status = $("#workbench-card-status");
+  if (current && status) status.textContent = `${app.cardDrafts[current.id]?.dirty ? "已保存版本 " : "版本 "}${current.version || 1} · ${cardStatusLabel(current)}${app.cardDrafts[current.id]?.dirty ? " · 当前修改未检查" : ""}`;
+  for (const options of document.querySelectorAll("[data-manual-review]")) options.hidden = current?.status === "approved" || ["queued", "running"].includes(current?.review_state);
+  for (const action of document.querySelectorAll("[data-start-practice]")) action.disabled = !app.data.cards.some(card => card.status === "approved");
+  const count = $("#studio-review-count");
+  if (count) {
+    const cards = app.data.cards.filter(card => !app.reviewDocument || app.reviewDocument === "all" || card.document_id === app.reviewDocument);
+    const processing = card => ["queued", "running"].includes(card.review_state) || AutoIllustration.active(card);
+    count.textContent = `${cards.filter(card => card.status === "approved").length} 张可学习 · ${cards.filter(processing).length} 张检查或配图中 · ${cards.filter(card => card.status === "draft" && !processing(card)).length} 张待处理`;
+    const filter = document.querySelector('select[aria-label="筛选卡片状态"]');
+    for (const option of filter?.options || []) {
+      const label = { all: "全部卡片", draft: "检查中 / 待处理", approved: "可学习", rejected: "已拒绝" }[option.value];
+      option.textContent = `${label} · ${option.value === "all" ? cards.length : cards.filter(card => card.status === option.value).length}`;
+    }
+  }
+}
+async function pollReviewProgress() {
+  if (!hasPendingReviews() && !hasPendingGeneration() && !hasPendingIllustrations()) return;
+  try {
+    const latest = await api("/api/state");
+    app.data.generation_jobs = latest.generation_jobs || [];
+    if (latest.media) app.data.media = latest.media;
+    const approvedBefore = approvedCardIds();
+    // Update saved records in place. Never rebuild the editor or replace its
+    // draft while a learner types or a model finishes in the background.
+    const previous = new Map(app.data.cards.map(card => [card.id, card]));
+    app.data.cards = (latest.cards || []).map(card => {
+      const existing = previous.get(card.id);
+      if (!existing || existing.version > card.version) return existing || card;
+      for (const key of Object.keys(existing)) if (!(key in card)) delete existing[key];
+      return Object.assign(existing, card);
+    });
+    reviewPollFailures = 0;
+    if (approvedBefore !== approvedCardIds() && (app.view === "export" || app.view === "practice" && !document.querySelector(".practice-panel textarea"))) render();
+    updateReviewIndicators();
+    document.querySelector(".generation-planner")?.refreshJob?.();
+    document.querySelector(".card-auto-review")?.refreshReview?.();
+    for (const imageReview of document.querySelectorAll(".image-auto-review")) imageReview.refreshReview?.();
+    for (const illustration of document.querySelectorAll(".auto-illustration")) illustration.refreshIllustration?.();
+  } catch {
+    reviewPollFailures += 1;
+    const status = $("#studio-review-count");
+    if (status) status.textContent = "暂时无法读取检查进度，正在重新连接；编辑内容仍保留。";
+    const generationStatus = $(".generation-job-progress");
+    if (generationStatus) generationStatus.textContent = "暂时无法读取制卡进度，正在重新连接。任务和已生成的卡片保留在本地服务中。";
+  }
+  scheduleReviewPoll();
+}
 try { app.practiceDrafts = JSON.parse(sessionStorage.getItem(practiceStorageKey) || "{}"); } catch { app.practiceDrafts = {}; }
 if (!app.practiceDrafts || typeof app.practiceDrafts !== "object" || Array.isArray(app.practiceDrafts)) app.practiceDrafts = {};
 try { app.proofDrafts = JSON.parse(sessionStorage.getItem(proofStorageKey) || "{}"); } catch { app.proofDrafts = {}; }
@@ -80,14 +158,24 @@ async function api(path, options = {}) {
 function jsonOptions(method, body) { return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }; }
 async function refresh() {
   app.data = await api("/api/state");
-  for (const key of ["documents", "blocks", "cards", "attempts", "source_pages", "media"]) app.data[key] ||= [];
+  for (const key of ["documents", "blocks", "cards", "attempts", "source_pages", "source_proposals", "media", "generation_jobs"]) app.data[key] ||= [];
   if (!app.data.documents.some(item => item.id === app.documentId)) app.documentId = app.data.documents[0]?.id || null;
   const eligibleIds = new Set(app.data.documents.flatMap(doc => blocksFor(doc.id).filter(blockCanGenerate).map(block => block.block_id)));
   for (const id of app.selectedBlocks) if (!eligibleIds.has(id)) app.selectedBlocks.delete(id);
   render();
+  scheduleReviewPoll();
 }
 function setView(view) {
   app.view = view;
+  if (view === "materials") app.studioStage = "source";
+  if (view === "review" && app.studioStage === "source") app.studioStage = "card";
+  render();
+  window.scrollTo({ top: 0, behavior: "instant" });
+}
+function setStudioStage(stage) {
+  if (!app.data || (stage !== "source" && !app.data.cards.length)) return;
+  app.studioStage = stage;
+  app.view = stage === "source" ? "materials" : "review";
   render();
   window.scrollTo({ top: 0, behavior: "instant" });
 }
@@ -115,11 +203,40 @@ function blocksFor(id) {
   return app.data.blocks.filter(item => item.document_id === id && (!ids || ids.has(item.block_id))).sort((a, b) => a.page - b.page || a.block_id.localeCompare(b.block_id, "en", { numeric: true }));
 }
 function blockCanGenerate(block) {
-  const page = sourcePagesFor(block.document_id).find(item => item.page === block.page);
-  return !page || page.status === "reviewed";
+  if (!block.text?.trim()) return false;
+  const pages = sourcePagesFor(block.document_id);
+  if (!pages.length) return true;
+  const page = pages.find(item => item.page === block.page);
+  return Boolean(page && ["pending", "reviewed"].includes(page.status) && page.text?.trim() && page.block_ids?.includes(block.block_id));
+}
+function sourceGenerationMessage(doc) {
+  const unsaved = blocksFor(doc.id).some(block => (!app.customGenerationScope[doc.id] || app.selectedBlocks.has(block.block_id)) && app.proofDrafts[`${doc.id}:${block.page}`]);
+  return { unsaved, text: unsaved ? "所选页面有未保存修改。本次制卡使用已保存原文；如需使用修改，请先在原文检查中保存。" : "制卡使用已保存的提取文字，不会自动采纳 AI 校对建议或未保存的修改。" };
+}
+function updateSourceGenerationNote(doc) {
+  const node = $("#source-generation-note");
+  if (!node) return;
+  const message = sourceGenerationMessage(doc);
+  node.textContent = message.text;
+  node.classList.toggle("has-unsaved", message.unsaved);
 }
 function proofKey(doc, page) { return `${doc.id}:${page.page}`; }
-function focusProofreader() { $("#source-proofreader")?.scrollIntoView({ block: "start", behavior: "instant" }); $("#proof-page-selector")?.focus({ preventScroll: true }); }
+function sourceProposalFor(doc, page) {
+  return (app.data.source_proposals || []).filter(item => item.document_id === doc.id && item.page === page.page && item.revision === page.revision)
+    .sort((left, right) => String(right.created_at || "").localeCompare(String(left.created_at || "")))[0] || null;
+}
+function rememberSourceProposal(proposal) {
+  app.data.source_proposals = (app.data.source_proposals || []).filter(item => item.id !== proposal.id);
+  app.data.source_proposals.push(proposal);
+}
+function focusProofreader() {
+  if (app.documentId && !app.proofOpen[app.documentId]) {
+    app.proofOpen[app.documentId] = true;
+    render();
+  }
+  $("#source-proofreader")?.scrollIntoView({ block: "start", behavior: "instant" });
+  $("#proof-page-selector")?.focus({ preventScroll: true });
+}
 function previewSourceImage(doc, page, opener) {
   const dialog = el("dialog", { class: "proof-preview", "aria-labelledby": "proof-preview-title" });
   const image = el("img", { src: page.image_url, alt: `${doc.title}，PDF 第 ${page.page} 页原图` });
@@ -151,6 +268,8 @@ function demoButton(className = "btn secondary") {
     app.selectedBlocks.clear();
     await refresh();
     app.documentId = app.data.documents.find(item => item.is_demo)?.id || app.documentId;
+    app.reviewDocument = app.documentId;
+    app.showImport = false;
     render();
     toast("自编演示材料已导入，6 张卡片等待人工审核。");
   }), className);
@@ -160,7 +279,7 @@ function demoButton(className = "btn secondary") {
 function render() {
   if (!app.data) return;
   for (const nav of document.querySelectorAll("[data-view]")) {
-    const active = nav.dataset.view === app.view;
+    const active = nav.dataset.view === app.view || (nav.dataset.view === "materials" && app.view === "review");
     nav.classList.toggle("active", active);
     if (active) nav.setAttribute("aria-current", "page"); else nav.removeAttribute("aria-current");
   }
@@ -174,13 +293,39 @@ function render() {
     app.settingsPanel = null;
   }
   main.dataset.view = app.view;
-  main.replaceChildren(({ materials: renderMaterials, review: renderReview, practice: renderPractice, export: renderExport, settings: renderModelSettings })[app.view]());
+  const content = ({ materials: renderMaterials, review: renderReview, practice: renderPractice, export: renderExport, settings: renderModelSettings })[app.view]();
+  main.replaceChildren(app.view === "materials" || app.view === "review" ? renderStudioShell(content) : content);
   if (main.querySelector(".workbench-grid")?.dataset.cardId === oldGrid?.dataset.cardId) {
     for (const [name, position] of scrollPositions) {
       const body = main.querySelector(`.workbench-${name} > .panel-body`);
       if (body) body.scrollTop = position;
     }
   }
+  updateReviewIndicators();
+  scheduleReviewPoll();
+}
+
+function renderStudioShell(content) {
+  const selectedCard = app.data.cards.find(card => card.id === app.cardId);
+  const currentDoc = documentFor(app.view === "review" && selectedCard ? selectedCard.document_id : app.documentId);
+  const total = currentDoc ? sourcePagesFor(currentDoc.id).length : 0;
+  const stages = [["source", "1", "导入讲义"], ["card", "2", "制作卡片"], ["audit", "3", "检查结果"]];
+  const steps = el("nav", { class: "studio-steps", "aria-label": "讲义制卡步骤" });
+  for (const [key, number, label] of stages) {
+    const active = app.studioStage === key;
+    const step = button(el("span", { class: "studio-step-number" }, number), () => setStudioStage(key), `studio-step${active ? " active" : ""}`, key !== "source" && !app.data.cards.length);
+    step.append(text("span", label));
+    step.dataset.studioStage = key;
+    if (active) step.setAttribute("aria-current", "step");
+    steps.append(step);
+  }
+  const context = el("div", { class: "studio-context" },
+    text("span", currentDoc ? `当前讲义：${currentDoc.title}` : "尚未选择讲义"),
+    currentDoc && total ? text("span", `已导入 ${total} 页`) : null,
+    text("span", `${app.data.cards.filter(card => !currentDoc || card.document_id === currentDoc.id).length} 张卡片`));
+  return el("div", { class: "studio-workspace" },
+    heading("讲义制卡", "从讲义到卡片", "导入原文、制作图文卡片、核对机审结果，都在这里完成。"),
+    steps, context, el("div", { class: "studio-stage" }, content));
 }
 
 function renderModelSettings() {
@@ -188,24 +333,57 @@ function renderModelSettings() {
 }
 
 function renderMaterials() {
-  const page = el("div", {}, heading("01 / 学习材料", "从一份讲义，开始理解", "把课程中的关键知识，整理成有依据、可练习的学习卡片。", [demoButton(), button("查看卡片  →", () => setView("review"))]));
-  if (app.data.documents.length) page.append(el("div", { class: "workspace-summary", "aria-label": "学习空间概览" }, ...[
-    [app.data.documents.length, "份学习材料"],
-    [app.data.cards.filter(card => card.status === "draft").length, "张卡片待审核"],
-    [app.data.cards.filter(card => card.status === "approved").length, "张卡片可练习"]
-  ].map(([count, label]) => el("div", { class: "summary-item" }, text("strong", String(count).padStart(2, "0")), text("span", label)))));
-  page.append(el("div", { class: "flow" }, ...[
-    ["01", "导入并校对原文", "文字 / 扫描 PDF 或纯文本"],
-    ["02", "审核卡片与依据", "确认问题、答案和原文"],
-    ["03", "练习并获得反馈", "发现遗漏，回到知识点"]
-  ].map(([n, title, desc]) => el("div", { class: "flow-step" }, text("span", n, "step-number"), el("div", {}, text("strong", title), text("small", desc))))));
   const currentDocument = documentFor(app.documentId);
-  if (currentDocument && sourcePagesFor(currentDocument.id).length) page.append(renderProofreader(currentDocument));
-  const left = el("div", { class: "stack" }, renderImportPanel());
-  if (app.data.documents.length) left.append(renderDocumentList());
-  left.append(el("div", { class: "demo-card" }, text("span", "⌘", "demo-symbol"), el("div", {}, text("h3", "还没有准备好讲义？"), text("p", "先用自编的「栈与队列」示例走通流程。")), demoButton("btn secondary small")));
-  const right = app.documentId ? renderSourcePanel() : panel("材料原文", "导入后，可按页选择用于生成卡片的片段", empty("让知识有一个可靠的起点", "选择 PDF 或粘贴课程原文。也可以先导入演示材料，体验栈与队列的学习流程。", demoButton(), "▤"), badge("来源可追溯", "green"));
-  page.append(el("div", { class: "grid" }, left, right));
+  const page = el("div", { class: "studio-source-stage" }, heading("步骤 1", "导入讲义，开始制卡", "系统根据原文建议数量，你也可以自行调整。卡片会分批生成并自动检查。", currentDocument ? [button("开始制卡 ↓", () => document.querySelector("#source-selection-panel")?.scrollIntoView({ block: "start", behavior: "smooth" }), "btn secondary small")] : null));
+  const materials = el("div", { class: "studio-materials" });
+  if (app.data.documents.length) {
+    materials.append(renderDocumentList(), button(app.showImport ? "收起导入" : "＋ 导入新讲义", () => { app.showImport = !app.showImport; render(); }, "btn secondary small"));
+  }
+  if (!app.data.documents.length || app.showImport) materials.append(renderImportPanel());
+  if (!app.data.documents.length) materials.append(el("div", { class: "demo-card" }, text("span", "⌘", "demo-symbol"), el("div", {}, text("h3", "想先试用？"), text("p", "导入自编的「栈与队列」示例。")), demoButton("btn secondary small")));
+  page.append(materials);
+  if (currentDocument) {
+    const sources = renderSourcePanel();
+    sources.id = "source-selection-panel";
+    page.append(sources);
+  }
+  if (currentDocument && sourcePagesFor(currentDocument.id).length) {
+    const pages = sourcePagesFor(currentDocument.id);
+    const checked = pages.filter(sourcePageConfirmed).length;
+    const unconfirmed = pages.filter(item => !sourcePageConfirmed(item));
+    const suspicious = unconfirmed.filter(item => item.quality?.needs_attention && item.status !== "failed" && item.text?.trim());
+    const hasUnsavedProof = pages.some(item => Boolean(app.proofDrafts[proofKey(currentDocument, item)]));
+    if (app.proofOpen[currentDocument.id] === undefined) app.proofOpen[currentDocument.id] = false;
+    const expanded = app.proofOpen[currentDocument.id];
+    const batch = app.aiProofBatch?.documentId === currentDocument.id ? app.aiProofBatch : null;
+    const proofActions = el("div", { class: "studio-proof-actions" });
+    const toggleProof = button(expanded ? "收起原文检查" : "检查原文", () => { app.proofOpen[currentDocument.id] = !expanded; render(); }, "btn secondary small");
+    toggleProof.setAttribute("aria-expanded", String(expanded));
+    proofActions.append(toggleProof);
+    const proofOverview = el("div", { class: "studio-proof-overview" });
+    proofOverview.append(el("div", { class: "studio-proof-gate" },
+      el("div", {}, text("strong", `原文检查（可选） · ${checked}/${pages.length} 页已人工核对`), text("p", hasUnsavedProof ? "有未保存的校对修改，尚未用于制卡。展开后可继续编辑或保存。" : "发现文字、公式或顺序有疑问时，可在这里对照原页修正。", "helper")),
+      proofActions));
+    const qualitySummary = el("div", { class: "source-quality-summary" },
+      text("strong", `本机疑点筛查 · ${suspicious.length} 页建议优先检查`),
+      text("p", "检查编号跳项、残句、表格顺序、公式和低置信度行。不调用 API；未标出疑点不代表没有漏字。普通页面可直接制卡。", "helper"));
+    if (suspicious.length) {
+      qualitySummary.append(button(`AI 仅校对疑点页（${suspicious.length}）`, () => runAIProofreadBatch(currentDocument, suspicious), "btn secondary small", !modeIsCloud() || Boolean(app.aiProofBusy || app.proofBusy || batch?.running)),
+        text("p", `点击后仅发送第 ${suspicious.map(item => item.page).join("、")} 页原图与文字，每页一次；建议不会覆盖已有编辑。`, "helper"));
+      const details = el("details", {}, text("summary", "查看疑点与定位"));
+      for (const item of suspicious) details.append(el("div", { class: "source-quality-page" },
+        button(`第 ${item.page} 页 →`, () => { app.sourcePage[currentDocument.id] = item.page; app.proofOpen[currentDocument.id] = true; render(); focusProofreader(); }, "btn quiet small"),
+        text("p", item.quality.issues.map(issue => issue.message).join(" "), "helper")));
+      qualitySummary.append(details);
+    }
+    proofOverview.append(qualitySummary);
+    if (expanded && unconfirmed.length) proofOverview.append(el("div", { class: "studio-proof-batch" },
+      button(`AI 检查未人工核对的 ${unconfirmed.length} 页`, () => runAIProofreadBatch(currentDocument, unconfirmed), "btn secondary small", !modeIsCloud() || Boolean(app.aiProofBusy) || Boolean(app.proofBusy) || Boolean(batch?.running)),
+      text("p", `可选：逐页检查耗时较长。点击后会向当前模型发送原页图片和识别文字（共 ${unconfirmed.length} 页，每页一次，不自动重试）。建议不会自动保存或确认。`, "helper studio-ai-disclosure")));
+    if (batch) proofOverview.append(renderAIProofBatchStatus(batch));
+    page.append(proofOverview);
+    if (expanded) page.append(renderProofreader(currentDocument));
+  }
   return page;
 }
 function renderImportPanel() {
@@ -222,7 +400,7 @@ function renderImportPanel() {
     const start = el("input", { type: "number", min: "1", placeholder: "从第一页", "aria-label": "起始页" });
     const end = el("input", { type: "number", min: "1", placeholder: "到最后一页", "aria-label": "结束页" });
     const recognitionMode = el("select", { "aria-label": "PDF 识别方式" }, el("option", { value: "auto" }, "自动识别 · 扫描页使用 OCR"), el("option", { value: "ocr" }, "全部使用 OCR · 适合乱码或扫描件"), el("option", { value: "text" }, "仅提取 PDF 内置文字"));
-    const form = el("form", {}, el("div", { class: "dropzone" }, text("div", "↥", "upload-symbol"), text("strong", "把课堂知识带进来"), text("p", "支持文字型与扫描型 PDF 讲义"), file), el("div", { class: "field-row" }, field("起始页（可选）", start), field("结束页（可选）", end)), field("识别方式", recognitionMode, "OCR 在本机识别印刷文字，导入后请对照页面校对。"), errorNode);
+    const form = el("form", {}, el("div", { class: "dropzone" }, text("div", "↥", "upload-symbol"), text("strong", "把课堂知识带进来"), text("p", "支持文字型与扫描型 PDF 讲义"), file), el("div", { class: "field-row" }, field("起始页（可选）", start), field("结束页（可选）", end)), field("识别方式", recognitionMode, "OCR 在本机识别印刷文字；导入后可直接制卡，也可按需修正原文。"), errorNode);
     const submit = el("button", { type: "submit", class: "btn full" }, "导入并提取原文  ↗");
     const importHint = text("p", "按 PDF 实际页序选择，封面也算一页。建议先导入 2–3 页；OCR 可能需要数秒到数分钟。", "helper");
     form.append(submit, importHint);
@@ -238,10 +416,12 @@ function renderImportPanel() {
         if (end.value) data.append("end_page", end.value);
         const result = await api("/api/documents", { method: "POST", body: data });
         app.documentId = result.id || result.document?.id || null;
+        app.reviewDocument = app.documentId;
+        app.showImport = false;
         app.selectedBlocks.clear();
         await refresh();
         focusProofreader();
-        toast("讲义已导入，请逐页对照原图，保存校对后再生成卡片。");
+        toast("讲义已导入，选择原文片段即可生成草稿。需要时可展开检查原文。");
       }, errorNode);
     });
     body.append(form);
@@ -256,6 +436,8 @@ function renderImportPanel() {
       actionWithButton(submit, "正在保存…", async () => {
         const result = await api("/api/documents/text", jsonOptions("POST", { title: title.value.trim(), text: content.value.trim() }));
         app.documentId = result.id || result.document?.id || null;
+        app.reviewDocument = app.documentId;
+        app.showImport = false;
         app.selectedBlocks.clear();
         await refresh();
         toast("课程原文已保存。");
@@ -266,7 +448,7 @@ function renderImportPanel() {
   return panel("导入课程材料", "建议先选一个小节，便于逐条核对", body);
 }
 function renderDocumentList() {
-  return panel("已导入材料", `${app.data.documents.length} 份本地材料`, el("div", { class: "documents" }, ...app.data.documents.map(doc => button(el("span", { class: "document-info" }, text("strong", doc.title), text("span", `${doc.is_demo ? "自编演示 · " : ""}${blocksFor(doc.id).length} 个原文片段`, "meta")), () => { app.documentId = doc.id; app.selectedBlocks.clear(); render(); }, `document-row${doc.id === app.documentId ? " selected" : ""}`))));
+  return panel("当前讲义", `${app.data.documents.length} 份本地材料`, el("div", { class: "documents" }, ...app.data.documents.map(doc => button(el("span", { class: "document-info" }, text("strong", doc.title), text("span", `${doc.is_demo ? "自编演示 · " : ""}${blocksFor(doc.id).length} 个原文片段`, "meta")), () => { app.documentId = doc.id; app.reviewDocument = doc.id; app.selectedBlocks.clear(); render(); }, `document-row${doc.id === app.documentId ? " selected" : ""}`))));
 }
 async function updateSourcePage(doc, sourcePage, action) {
   if (app.proofBusy) return;
@@ -276,7 +458,7 @@ async function updateSourcePage(doc, sourcePage, action) {
   app.proofBusy = key;
   delete app.proofErrors[key];
   render();
-  announce(action === "ocr" ? "正在本机重新识别本页。" : "正在保存本页校对。");
+  announce(action === "ocr" ? "正在本机重新识别本页。" : "正在保存本页原文。");
   try {
     const path = `/api/documents/${encodeURIComponent(doc.id)}/pages/${sourcePage.page}`;
     const result = await api(action === "ocr" ? `${path}/ocr` : path, jsonOptions(action === "ocr" ? "POST" : "PUT", action === "ocr" ? { revision: sourcePage.revision } : { revision: draft?.revision ?? sourcePage.revision, text: draft?.text ?? sourcePage.text }));
@@ -284,7 +466,7 @@ async function updateSourcePage(doc, sourcePage, action) {
     keepProofDrafts();
     app.selectedBlocks.clear();
     await refresh();
-    const message = result.status === "failed" ? result.error || "本页识别未完成，可以重试或对照原图手动录入。" : action === "ocr" ? "重新识别完成，请核对新文字后保存。" : "本页校对已保存。原始识别文字与历史引用均已保留。";
+    const message = result.status === "failed" ? result.error || "本页识别未完成，可以重试或对照原图手动录入。" : action === "ocr" ? "重新识别完成，请核对新文字后保存。" : "本页原文已保存。原始识别文字与历史引用均已保留。";
     toast(message, result.status === "failed");
     announce(message);
   } catch (error) {
@@ -298,6 +480,100 @@ async function updateSourcePage(doc, sourcePage, action) {
     render();
   }
 }
+async function requestAIProofreadPage(doc, sourcePage, inBatch = false) {
+  if (!modeIsCloud() || app.aiProofBusy || app.proofBusy) return { ok: false, error: "请先完成当前操作，并确认已配置云端模型。" };
+  const key = proofKey(doc, sourcePage);
+  app.aiProofBusy = key;
+  delete app.aiProofErrors[key];
+  if (!inBatch) render();
+  try {
+    const proposal = await api(`/api/documents/${encodeURIComponent(doc.id)}/pages/${sourcePage.page}/ai-proofread`, jsonOptions("POST", { revision: sourcePage.revision }));
+    const current = sourcePagesFor(doc.id).find(item => item.page === sourcePage.page);
+    if (!current || current.revision !== proposal.revision || proposal.document_id !== doc.id || proposal.page !== sourcePage.page) {
+      throw new Error("此页已更新，AI 建议没有应用到新版本。请重新检查。");
+    }
+    rememberSourceProposal(proposal);
+    if (!inBatch) toast(proposal.uncertain ? "AI 已标出本页疑点，请对照原图确认。" : "AI 建议已生成；请检查后再保存确认。");
+    return { ok: true, proposal };
+  } catch (error) {
+    app.aiProofErrors[key] = error.message;
+    if (!inBatch && error.status === 409) {
+      try { await refresh(); } catch { /* Preserve the failure message and the user's draft. */ }
+    }
+    if (!inBatch) toast(error.message, true);
+    return { ok: false, error: error.message };
+  } finally {
+    app.aiProofBusy = null;
+    if (!inBatch) render();
+  }
+}
+function renderAIProofBatchStatus(batch) {
+  const status = batch.running ? batch.cancelRequested ? "正在停止：当前页完成后不再发送下一页" : `正在处理第 ${batch.currentPage || "—"} 页` : batch.cancelRequested ? "已停止后续页面" : "本轮已完成";
+  const details = batch.failures.length ? el("ul", { class: "studio-ai-failures" }, ...batch.failures.map(item => text("li", `第 ${item.page} 页：${item.message}`))) : null;
+  const cancel = batch.running && !batch.cancelRequested ? button("停止后续页面", () => { batch.cancelRequested = true; updateAIProofBatchStatus(); }, "btn secondary small") : null;
+  return el("div", { id: "source-ai-batch-status", class: "studio-ai-batch-status", role: "status", "aria-live": "polite" },
+    el("div", { class: "studio-ai-batch-heading" }, text("strong", status), cancel),
+    text("p", `已处理 ${batch.completed}/${batch.total} 页 · 成功 ${batch.completed - batch.failures.length} · 失败 ${batch.failures.length}。每页只请求一次，失败页需手动重试。`, "helper"),
+    el("progress", { value: batch.completed, max: batch.total, "aria-label": "AI 校对进度" }), details);
+}
+function updateAIProofBatchStatus() {
+  const current = $("#source-ai-batch-status");
+  if (current && app.aiProofBatch) current.replaceWith(renderAIProofBatchStatus(app.aiProofBatch));
+}
+async function runAIProofreadBatch(doc, pages) {
+  if (!modeIsCloud() || app.aiProofBusy || app.proofBusy || app.aiProofBatch?.running || !pages.length) return;
+  const targets = pages.map(item => ({ page: item.page, revision: item.revision }));
+  if (!window.confirm(`将把「${doc.title}」中 ${targets.length} 页的原页图片和识别文字发送给当前配置的云端模型。每页请求一次，失败不自动重试，可能消耗 API 额度；AI 建议不会自动保存或确认。是否开始？`)) return;
+  const batch = { documentId: doc.id, total: targets.length, completed: 0, currentPage: null, failures: [], running: true, cancelRequested: false };
+  app.aiProofBatch = batch;
+  app.proofOpen[doc.id] = true;
+  render();
+  for (const target of targets) {
+    if (batch.cancelRequested) break;
+    batch.currentPage = target.page;
+    updateAIProofBatchStatus();
+    const current = sourcePagesFor(doc.id).find(item => item.page === target.page);
+    const outcome = current && current.revision === target.revision
+      ? await requestAIProofreadPage(doc, current, true)
+      : { ok: false, error: "此页已更新，跳过旧版本。" };
+    batch.completed += 1;
+    if (!outcome.ok) batch.failures.push({ page: target.page, message: outcome.error });
+    updateAIProofBatchStatus();
+  }
+  batch.running = false;
+  batch.currentPage = null;
+  try { await refresh(); } catch (error) { toast(`AI 校对请求已结束，但刷新失败：${error.message}`, true); }
+  const attention = batch.failures[0]?.page || targets.find(item => sourceProposalFor(doc, { page: item.page, revision: item.revision })?.uncertain)?.page || targets[0].page;
+  app.sourcePage[doc.id] = attention;
+  render();
+  const skipped = batch.total - batch.completed;
+  toast(`AI 校对已处理 ${batch.completed}/${batch.total} 页：${batch.failures.length} 页失败${skipped ? `，${skipped} 页未发送` : ""}。建议可按需采纳，无需逐页确认才能制卡。`, Boolean(batch.failures.length));
+}
+function renderAIProofProposal(doc, sourcePage, proposal, draft, conflict) {
+  const key = proofKey(doc, sourcePage);
+  const issueList = Array.isArray(proposal.issues) && proposal.issues.length
+    ? el("ul", { class: "proof-ai-issues" }, ...proposal.issues.map(item => text("li", item)))
+    : text("p", "模型未标出具体疑点；仍请对照原页核对文字、公式和阅读顺序。", "helper");
+  const adopt = button("将建议填入编辑框", () => {
+    if (app.proofDrafts[key] || sourcePage.revision !== proposal.revision) return;
+    if (proposal.suggested_text !== sourcePage.text) {
+      app.proofDrafts[key] = { text: proposal.suggested_text, revision: sourcePage.revision, baseText: sourcePage.text };
+      keepProofDrafts();
+    }
+    render();
+    $("#proof-text")?.focus({ preventScroll: true });
+    toast(proposal.suggested_text === sourcePage.text ? "AI 建议与当前文字一致；请对照原页后确认。" : "AI 建议已填入编辑框，尚未保存；请核对后再确认。");
+  }, "btn secondary small", Boolean(draft || conflict || app.proofBusy));
+  return el("section", { id: "source-ai-proposal", class: "proof-ai-proposal", "aria-label": "本页 AI 校对建议" },
+    el("div", { class: "proof-ai-heading" },
+      el("div", {}, text("h3", "AI 校对建议"), text("p", `${proposal.model || "当前模型"} · ${formatDate(proposal.created_at)}${proposal.cached ? " · 已复用结果" : ""}`, "helper")),
+      badge(proposal.uncertain ? "需注意" : "待你确认", proposal.uncertain ? "amber" : "blue")),
+    el("div", { class: "proof-ai-comparison" },
+      el("div", {}, text("strong", "当前已保存原文"), text("p", sourcePage.text || "（当前没有文字）", "source-text")),
+      el("div", {}, text("strong", "AI 建议文字"), text("p", proposal.suggested_text || "（建议留空，请确认是否为空白页）", "source-text"))),
+    el("div", { class: "proof-ai-footer" }, el("div", {}, text("strong", "需要检查"), issueList),
+      el("div", { class: "proof-ai-adopt" }, adopt, text("span", draft ? "已有未保存修改，建议不会覆盖。请先保存或放弃修改。" : "采纳只填入编辑框，仍需对照原页并点击保存确认。", "helper"))));
+}
 function renderProofreader(doc) {
   const pages = sourcePagesFor(doc.id);
   const sourcePage = pages.find(item => item.page === app.sourcePage[doc.id]) || pages.find(item => !sourcePageConfirmed(item)) || pages[0];
@@ -308,14 +584,20 @@ function renderProofreader(doc) {
   const busy = Boolean(app.proofBusy);
   const reviewed = pages.filter(sourcePageConfirmed).length;
   const body = el("div", { class: "proofreader-body" });
-  const select = el("select", { id: "proof-page-selector", "aria-label": "选择校对页", disabled: busy }, ...pages.map(item => el("option", { value: item.page, selected: sourcePage.page === item.page }, `第 ${item.page} 页 · ${sourcePageStatus(item)}${app.proofDrafts[proofKey(doc, item)] ? " · 有未保存修改" : ""}`)));
+  const select = el("select", { id: "proof-page-selector", "aria-label": "选择校对页", disabled: busy }, ...pages.map(item => el("option", { value: item.page, selected: sourcePage.page === item.page }, `第 ${item.page} 页 · ${sourcePageStatus(item)}${sourceProposalFor(doc, item)?.uncertain ? " · AI 标出疑点" : sourceProposalFor(doc, item) ? " · 有 AI 建议" : ""}${app.proofDrafts[proofKey(doc, item)] ? " · 有未保存修改" : ""}`)));
   select.addEventListener("change", () => { app.sourcePage[doc.id] = Number(select.value); render(); $("#proof-page-selector")?.focus(); });
   const pageIndex = pages.indexOf(sourcePage);
   function turnPage(offset) { app.sourcePage[doc.id] = pages[pageIndex + offset].page; render(); $("#proof-page-selector")?.focus(); }
   const navigation = el("div", { class: "proof-page-navigation" }, button("← 上一页", () => turnPage(-1), "btn secondary small", busy || pageIndex === 0), select, button("下一页 →", () => turnPage(1), "btn secondary small", busy || pageIndex === pages.length - 1));
-  body.append(el("div", { class: "proof-toolbar" }, navigation, el("div", { class: "proof-progress" }, text("span", `${reviewed} / ${pages.length} 页已确认`, "meta"), el("progress", { value: reviewed, max: pages.length, "aria-label": "页面校对进度" }))));
+  body.append(el("div", { class: "proof-toolbar" }, navigation, el("div", { class: "proof-progress" }, text("span", `${reviewed} / ${pages.length} 页已人工核对`, "meta"), el("progress", { value: reviewed, max: pages.length, "aria-label": "页面校对进度" }))));
   if (sourcePage.error) body.append(note(sourcePage.error, "error"));
+  if (sourcePage.quality?.issues?.length) body.append(el("div", { class: "notice warning source-quality-issues" }, text("strong", "本机筛查发现的信号"), el("ul", {}, ...sourcePage.quality.issues.map(issue => text("li", issue.message)))));
   if (app.proofErrors[key]) body.append(el("div", { class: "notice error", role: "alert" }, app.proofErrors[key]));
+  const aiButton = button(app.aiProofBusy === key ? "AI 正在校对本页…" : "AI 校对当前页", () => requestAIProofreadPage(doc, sourcePage), "btn secondary small", !modeIsCloud() || Boolean(app.aiProofBusy || app.aiProofBatch?.running || app.proofBusy));
+  body.append(el("div", { class: "proof-ai-action" },
+    el("div", {}, text("strong", "让 AI 先找疑点"), text("p", "点击后发送本页原页图片与识别文字至当前配置的模型。结果仅是建议，不会覆盖编辑或自动确认。", "helper")), aiButton));
+  if (!modeIsCloud()) body.append(text("p", "请先在「模型设置」配置云端 API，再使用 AI 校对；手工校对仍可继续。", "helper"));
+  if (app.aiProofErrors[key]) body.append(el("div", { class: "notice error", role: "alert" }, `AI 校对未完成：${app.aiProofErrors[key]}。可手动重试，已有编辑未受影响。`));
   if (conflict) body.append(el("div", { class: "proof-conflict" }, note(`此页已有更新版本 v${sourcePage.revision}。你的草稿基于 v${draft.revision}，请先对照，避免覆盖其他修改。`, "warning"), el("details", { open: "" }, text("summary", `查看最新已保存的文字 · v${sourcePage.revision}`), text("p", sourcePage.text || "（空白）", "source-text")), button("以此草稿继续校对新版本", () => { app.proofDrafts[key] = { text: draft.text, revision: sourcePage.revision, baseText: sourcePage.text }; keepProofDrafts(); delete app.proofErrors[key]; render(); }, "btn secondary small", busy)));
   const preview = sourcePage.image_url ? button("查看大图 ⤢", () => previewSourceImage(doc, sourcePage, preview), "btn quiet small") : null;
   const imageRegion = el("div", { class: "proof-original" }, el("div", { class: "proof-column-heading" }, text("h3", "PDF 原始页面"), preview));
@@ -327,8 +609,8 @@ function renderProofreader(doc) {
   } else imageRegion.append(note("此页暂无图像预览，请打开原始文件对照。", "warning"));
   if (doc.file_url) imageRegion.append(el("a", { href: doc.file_url, target: "_blank", rel: "noopener noreferrer", class: "helper" }, "打开原始 PDF ↗"));
   const input = el("textarea", { id: "proof-text", class: "proof-text-input", rows: "13", maxlength: "50000", spellcheck: "false", disabled: busy, value: draft?.text ?? sourcePage.text ?? "", "aria-label": `第 ${sourcePage.page} 页校对文字`, placeholder: "对照原图修正文字。识别失败时也可手动补入本页原文；确认空白页时可留空。" });
-  const dirtyNote = text("p", draft ? "有未保存修改 · 切换页面时保留在此标签页中" : "对照原图检查文字、符号与顺序，确认后再用于制卡。", "helper proof-draft-status");
-  const save = button(busy && app.proofBusy === key ? "正在处理本页，请稍候…" : input.value.trim() ? "保存并确认校对 ✓" : "保存并确认空白 ✓", () => updateSourcePage(doc, sourcePage, "save"), "btn", busy || conflict);
+  const dirtyNote = text("p", draft ? "有未保存修改 · 切换页面时保留在此标签页中" : "可对照原图修正文字、符号与顺序。制卡使用当前已保存原文。", "helper proof-draft-status");
+  const save = button(busy && app.proofBusy === key ? "正在处理本页，请稍候…" : input.value.trim() ? "保存原文" : "保存空白页", () => updateSourcePage(doc, sourcePage, "save"), "btn", busy || conflict);
   const reocr = button("重新 OCR 此页", () => updateSourcePage(doc, sourcePage, "ocr"), "btn secondary", busy || Boolean(draft));
   const discard = button("放弃修改，恢复已保存文字", () => { delete app.proofDrafts[key]; delete app.proofErrors[key]; keepProofDrafts(); render(); }, "btn quiet small", busy);
   discard.hidden = !draft;
@@ -337,16 +619,19 @@ function renderProofreader(doc) {
     else app.proofDrafts[key] = { text: input.value, revision: draft?.revision ?? sourcePage.revision, baseText: draft?.baseText ?? sourcePage.text };
     keepProofDrafts();
     const dirty = Boolean(app.proofDrafts[key]);
-    dirtyNote.textContent = dirty ? "有未保存修改 · 切换页面时保留在此标签页中" : "对照原图检查文字、符号与顺序，确认后再用于制卡。";
-    save.textContent = input.value.trim() ? "保存并确认校对 ✓" : "保存并确认空白 ✓";
+    dirtyNote.textContent = dirty ? "有未保存修改 · 切换页面时保留在此标签页中" : "可对照原图修正文字、符号与顺序。制卡使用当前已保存原文。";
+    updateSourceGenerationNote(doc);
+    save.textContent = input.value.trim() ? "保存原文" : "保存空白页";
     reocr.disabled = busy || dirty;
     discard.hidden = !dirty;
   });
   const statusColor = sourcePageConfirmed(sourcePage) ? "green" : sourcePage.status === "failed" ? "red" : "amber";
-  const editor = el("div", { class: "proof-editor" }, el("div", { class: "proof-column-heading" }, text("h3", "校对后的原文"), badge(sourcePageStatus(sourcePage), statusColor)), field(`第 ${sourcePage.page} 页 · ${sourcePage.method === "ocr" ? "本地 OCR" : "PDF 内置文字"} · 版本 ${sourcePage.revision}`, input), dirtyNote, el("div", { class: "proof-actions" }, save, reocr), discard, text("p", "重新识别会保留旧版本，并将本页重新标记为待校对。已有修改请先保存或放弃。", "helper"));
+  const editor = el("div", { class: "proof-editor" }, el("div", { class: "proof-column-heading" }, text("h3", "已保存的提取文字"), badge(sourcePageStatus(sourcePage), statusColor)), field(`第 ${sourcePage.page} 页 · ${sourcePage.method === "ocr" ? "本地 OCR" : "PDF 内置文字"} · 版本 ${sourcePage.revision}`, input), dirtyNote, el("div", { class: "proof-actions" }, save, reocr), discard, text("p", "重新识别会保留旧版本；文字变化后，相关卡片需要重新检查。已有修改请先保存或放弃。", "helper"));
   editor.append(el("details", { class: "proof-raw" }, text("summary", "查看原始识别文字"), text("p", `${sourcePage.method === "ocr" ? "OCR" : "文字提取"}${sourcePage.engine ? ` · ${sourcePage.engine}` : ""}${sourcePage.engine_version ? ` ${sourcePage.engine_version}` : ""}`, "meta"), text("p", sourcePage.raw_text || "（未识别出文字）", "source-text")));
   body.append(el("div", { class: "proof-columns" }, imageRegion, editor));
-  const proof = panel("逐页校对", `${doc.title} · 对照原图确认后，文字才可用于生成卡片`, body, badge("本机处理", "green"));
+  const proposal = sourceProposalFor(doc, sourcePage);
+  if (proposal) body.append(renderAIProofProposal(doc, sourcePage, proposal, draft, conflict));
+  const proof = panel("检查原文", `${doc.title} · 按需修正；修改文字后，相关卡片需要重新审核`, body, badge("原图与草稿本机保存", "green"));
   proof.id = "source-proofreader";
   proof.classList.add("proofreader-panel");
   return proof;
@@ -357,60 +642,80 @@ function renderSourcePanel() {
   const pages = sourcePagesFor(doc.id);
   const selectedCount = () => blocks.filter(b => blockCanGenerate(b) && app.selectedBlocks.has(b.block_id)).length;
   const body = el("div");
-  if (doc.is_demo) body.append(note("这是一份为验证流程而自编的「栈与队列」示例，不是真实课程讲义。演示卡片仍需人工审核后才能练习和导出。", "warning"));
-  if (doc.warning && !doc.is_demo) body.append(note(doc.warning, "warning"));
-  if (pages.length) body.append(el("div", { class: "source-review-summary" }, text("span", "仅已校对页面可用于制卡。修正原文后，相关卡片需要重新审核。", "helper"), button("前往逐页校对 ↑", focusProofreader, "btn quiet small")));
-  const selectionCount = text("span", `已选 ${selectedCount()} 个片段 · 每次最多 6 个`, "helper");
-  const generate = button("生成 3 张卡片草稿  →", () => actionWithButton(generate, "正在生成草稿…", async () => {
-    const ids = blocks.filter(b => blockCanGenerate(b) && app.selectedBlocks.has(b.block_id)).map(b => b.block_id);
-    if (!ids.length) throw new Error("请先选择至少一个原文片段。");
-    const result = await api("/api/card-drafts", jsonOptions("POST", { block_ids: ids, count: 3 }));
-    const created = result.cards || (Array.isArray(result) ? result : []);
-    app.cardId = created[0]?.id || null;
-    app.reviewDocument = created[0]?.document_id || doc.id;
-    app.reviewFilter = "all";
-    app.view = "review";
-    await refresh();
-    toast("草稿已生成，请核对问题、评分要点与原文依据。");
-  }), "btn small", !modeIsCloud() || !selectedCount());
-  body.append(el("div", { class: "source-tools source-selection" }, selectionCount, generate));
+  if (doc.is_demo) body.append(note("这是一份为验证流程而自编的「栈与队列」示例，不是真实课程讲义。演示卡片不调用云端自动检查，可在检查结果中手动确认体验流程。", "warning"));
+  if (doc.warning && !doc.is_demo) {
+    const warning = doc.warning.replace(/^请逐页对照原图校对并确认，再选择片段制卡；/, "可直接制卡，原文检查为可选操作；")
+      .replace(/^可直接选择片段生成卡片草稿，再结合卡片检查原文；批准卡片前需确认引用页。/, "可直接按讲义制卡并自动检查，原文检查为可选操作。");
+    body.append(note(warning, "warning"));
+  }
+  if (pages.length) body.append(el("div", { class: "source-review-summary" }, text("span", "提取出的文字可直接制卡并自动检查，无需逐页确认。", "helper"), button("检查原文 ↓", focusProofreader, "btn quiet small")));
+  const selectionCount = text("span", `已选 ${selectedCount()} 个片段`, "helper");
+  const generator = Generation.create({ documentId: doc.id,
+    preferences: app.generationPreferences[doc.id] ||= { custom: false, count: null },
+    api, configured: modeIsCloud(), getJob: () => generationJobFor(doc.id),
+    getBlockIds: () => app.customGenerationScope[doc.id] ? blocks.filter(b => blockCanGenerate(b) && app.selectedBlocks.has(b.block_id)).map(b => b.block_id) : null,
+    onJob: rememberGenerationJob, disclosure: automaticReviewNotice,
+    onView: async job => {
+      if (!job?.card_ids?.length) return;
+      app.cardId = job.card_ids[0]; app.reviewDocument = doc.id; app.reviewFilter = "all";
+      app.view = "review"; app.studioStage = "card";
+      try { await refresh(); } catch (error) { toast(error.message, true); }
+    },
+  });
+  body.append(generator);
+  const generationMessage = sourceGenerationMessage(doc);
+  const savedSourceNote = text("p", generationMessage.text, `helper source-generation-note${generationMessage.unsaved ? " has-unsaved" : ""}`);
+  savedSourceNote.id = "source-generation-note";
+  body.append(savedSourceNote);
   if (!modeIsCloud()) body.append(text("p", "真实材料生成需要配置后端 API Key，并开启云端模式。当前可以导入材料，或使用演示卡片审核和练习。", "helper"));
-  else body.append(text("p", "选中的原文将发送给当前配置的模型服务。生成结果是草稿，需要你逐条核对。", "helper"));
-  body.append(el("hr", { class: "section-divider" }));
+  const advanced = el("details", { class: "generation-advanced" }, el("summary", {}, "高级设置 · 指定出题范围"));
+  advanced.open = Boolean(app.customGenerationScope[doc.id]);
+  const customScope = el("input", { type: "checkbox", checked: app.customGenerationScope[doc.id], "aria-label": "仅使用勾选的原文片段" });
+  const advancedBody = el("div", { class: "generation-advanced-body" }, el("label", { class: "generation-scope-toggle" }, customScope, "仅使用勾选的原文片段"), text("p", "默认使用本次导入的全部有效原文。需要只针对一段内容出题时，再开启此选项。", "helper"), selectionCount);
+  customScope.addEventListener("change", () => {
+    app.customGenerationScope[doc.id] = customScope.checked;
+    for (const input of advancedBody.querySelectorAll(".source-block input")) input.disabled = !customScope.checked || input.dataset.eligible !== "true";
+    generator.refreshPlan(); updateSourceGenerationNote(doc);
+  });
   const sources = el("div", { class: "source-scroll" });
   if (!blocks.length) sources.append(note(pages.some(item => item.status === "failed") ? "暂时没有可用原文。请到逐页校对区重试识别，或对照原图手动补入文字。" : "此材料当前没有文字片段。可以到逐页校对区检查页面。"));
   for (const block of blocks) {
     const eligible = blockCanGenerate(block);
     const sourcePage = pages.find(item => item.page === block.page);
-    const check = el("input", { type: "checkbox", checked: eligible && app.selectedBlocks.has(block.block_id), disabled: !eligible, "aria-label": `选择${sourceLabel(block)} ${block.block_id}${eligible ? "" : "，请先校对"}` });
+    const check = el("input", { type: "checkbox", checked: eligible && app.selectedBlocks.has(block.block_id), disabled: !eligible || !customScope.checked, "data-eligible": String(eligible), "aria-label": `选择${sourceLabel(block)} ${block.block_id}${eligible ? "" : "，请先检查识别结果"}` });
     check.addEventListener("change", () => {
       if (check.checked) {
-        if (app.selectedBlocks.size >= 6) { check.checked = false; toast("每次最多选择 6 个片段。"); return; }
         app.selectedBlocks.add(block.block_id);
       } else app.selectedBlocks.delete(block.block_id);
-      selectionCount.textContent = `已选 ${selectedCount()} 个片段 · 每次最多 6 个`;
-      generate.disabled = !modeIsCloud() || !selectedCount();
+      selectionCount.textContent = `已选 ${selectedCount()} 个片段`;
+      generator.refreshPlan();
+      updateSourceGenerationNote(doc);
       check.closest(".source-block").classList.toggle("selected", check.checked);
     });
-    sources.append(el("article", { class: `source-block${check.checked ? " selected" : ""}${eligible ? "" : " source-unreviewed"}` }, el("div", { class: "source-top" }, el("label", {}, check, sourceLabel(block), sourcePage ? badge(sourcePageStatus(sourcePage), eligible ? "green" : "amber") : null), text("span", block.block_id, "source-id")), text("p", block.text, "source-text"), !eligible ? button("校对此页 →", () => { app.sourcePage[doc.id] = block.page; render(); focusProofreader(); }, "btn quiet small") : null));
+    sources.append(el("article", { class: `source-block${check.checked ? " selected" : ""}${eligible ? "" : " source-unreviewed"}` }, el("div", { class: "source-top" }, el("label", {}, check, sourceLabel(block), sourcePage ? badge(sourcePageStatus(sourcePage), sourcePageConfirmed(sourcePage) ? "green" : sourcePage.status === "failed" ? "red" : "amber") : null), text("span", block.block_id, "source-id")), text("p", block.text, "source-text"), sourcePage ? button("查看此页原文 →", () => { app.sourcePage[doc.id] = block.page; render(); focusProofreader(); }, "btn quiet small") : null));
   }
-  body.append(sources);
+  advancedBody.append(sources); advanced.append(advancedBody); body.append(advanced);
   return panel(doc.title, `${doc.filename || "文本材料"} · ${blocks.length} 个当前原文片段`, body, badge(doc.is_demo ? "自编演示" : "本地材料", doc.is_demo ? "amber" : "green"));
 }
 
 function renderReview() {
   const all = app.data.cards;
   const approved = all.filter(c => c.status === "approved").length;
-  const page = el("div", { class: "card-workspace" }, heading("02 / 制卡工作台", "把讲义，做成看得懂的卡片", "左边核对讲义，中间编辑内容，右边预览正反面。保存并批准后，就可以开始学习。", [button("导入讲义", () => setView("materials"), "btn secondary"), button("前往练习  →", () => setView("practice"), "btn", !approved)]));
-  if (!all.length) { page.append(panel("等待第一张卡片", "先从材料开始", empty("从一小节讲义开始制卡", "在学习材料中选取原文生成草稿，或先用演示卡片体验编辑与配图。", demoButton()))); return page; }
+  const auditing = app.studioStage === "audit";
+  const page = el("div", { class: `card-workspace${auditing ? " studio-audit-stage" : ""}` }, heading(auditing ? "步骤 3" : "步骤 2", auditing ? "查看检查结果" : "编辑图文卡片", auditing ? "机器审核通过即可学习。仅对有疑点、检查失败或引用过期的卡片进行处理。" : "修改问题、答案、配图与引用，右侧可随时预览。", [button(auditing ? "返回编辑" : "返回讲义", () => setStudioStage(auditing ? "card" : "source"), "btn secondary small"), auditing ? button("开始练习 →", () => setView("practice"), "btn small", !approved) : button("查看检查结果 →", () => setStudioStage("audit"), "btn small", !all.length)]));
+  page.querySelectorAll(".page-actions button").forEach(action => { if (action.textContent.includes("开始练习")) action.dataset.startPractice = "true"; });
+  page.append(text("p", "", "helper studio-review-count"));
+  page.lastChild.id = "studio-review-count";
+  if (!all.length) { page.append(panel("等待第一张卡片", "先从材料开始", empty("从一小节讲义开始制卡", "在第一步导入讲义并开始制卡，或导入演示材料。", button("去导入讲义", () => setStudioStage("source"))))); return page; }
   const course = el("select", { "aria-label": "筛选课程" }, el("option", { value: "all" }, "全部课程"), ...app.data.documents.map(doc => el("option", { value: doc.id, selected: doc.id === app.reviewDocument }, doc.title)));
-  course.addEventListener("change", () => { app.reviewDocument = course.value; render(); });
+  course.addEventListener("change", () => { app.reviewDocument = course.value; if (course.value !== "all") app.documentId = course.value; render(); });
   const courseCards = all.filter(c => !app.reviewDocument || app.reviewDocument === "all" || c.document_id === app.reviewDocument);
-  const filter = el("select", { "aria-label": "筛选卡片状态" }, ...[["all", "全部卡片"], ["draft", "待审核"], ["approved", "已批准"], ["rejected", "已拒绝"]].map(([value, label]) => el("option", { value, selected: value === app.reviewFilter }, `${label} · ${value === "all" ? courseCards.length : courseCards.filter(c => c.status === value).length}`)));
+  const filter = el("select", { "aria-label": "筛选卡片状态" }, ...[["all", "全部卡片"], ["draft", "检查中 / 待处理"], ["approved", "可学习"], ["rejected", "已拒绝"]].map(([value, label]) => el("option", { value, selected: value === app.reviewFilter }, `${label} · ${value === "all" ? courseCards.length : courseCards.filter(c => c.status === value).length}`)));
   filter.addEventListener("change", () => { app.reviewFilter = filter.value; render(); });
   const cards = courseCards.filter(c => app.reviewFilter === "all" || c.status === app.reviewFilter);
   const card = cards.find(c => c.id === app.cardId) || cards[0];
   app.cardId = card?.id || null;
+  if (card) app.documentId = card.document_id;
   const selector = el("select", { "aria-label": "选择编辑卡片", disabled: !cards.length }, ...cards.map((c, i) => el("option", { value: c.id, selected: c.id === card?.id }, `${i + 1}. ${app.cardDrafts[c.id]?.dirty ? "[未保存] " : ""}${c.question}`)));
   selector.addEventListener("change", () => { app.cardId = selector.value; render(); });
   const index = cards.indexOf(card);
@@ -438,7 +743,7 @@ async function cardEditOperation(card, operation, callback) {
   render();
   try { await callback(); }
   catch (error) {
-    app.cardEditErrors[card.id] = `${error.message} 未保存的编辑内容仍然保留。`;
+    app.cardEditErrors[card.id] = operation === "auto_review" ? `${error.message} 卡片内容未改变，可以重试或人工核对。` : `${error.message} 未保存的编辑内容仍然保留。`;
     if (error.status === 409) (app.cardEditConflicts ||= {})[card.id] = true;
   }
   finally { app.cardEditBusy = null; render(); }
@@ -457,7 +762,7 @@ function renderCardImageEditor(card, draft) {
     if (draft.images.length >= 4) throw new Error("每张卡片最多附加 4 张图片。");
     draft.images.push({ media_id: record.id, side, caption: record.source?.origin === "figure_recommendation" ? `讲义第 ${record.source.page} 页` : "" });
     draft.dirty = true;
-    toast("配图已加入待保存内容。保存草稿或核对并批准后，才会附加到卡片。");
+    toast("配图已加入待保存内容。保存后会与卡片一起自动检查。");
   };
   const upload = el("input", { type: "file", accept: "image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp", disabled: busy || full, "aria-label": "上传讲义截图或图片" });
   upload.addEventListener("change", () => {
@@ -471,7 +776,8 @@ function renderCardImageEditor(card, draft) {
       addMedia(await api("/api/card-media", { method: "POST", body }));
     });
   });
-  section.append(el("div", { class: "card-image-heading" }, text("h3", "讲义配图"), badge(`${draft.images.length} / 4 张`)), text("p", "先从引用页推荐配图，也可上传截图。新增图片默认放在答案侧；整页讲义可能包含答案，请谨慎改到题目侧。", "helper"));
+  section.append(el("div", { class: "card-image-heading" }, text("h3", "讲义配图"), badge(`${draft.images.length} / 4 张`)), text("p", "先从引用页推荐配图，也可上传截图。保存后可让模型自动筛查已采纳的讲义配图；题目侧图片请留意是否提前暴露答案。", "helper"));
+  section.append(AutoIllustration.create({ card, draft, onReload: () => reloadSavedCard(card, draft) }));
   if (pages.length) section.append(FigureRecommendations.create({ card, draft, api, busy, media: app.data.media, vision: app.data.image_check,
     run: callback => cardEditOperation(card, "upload", callback), onAdopt: addMedia }));
   const controls = el("div", { class: "card-image-controls" }, field("上传截图", upload, "PNG / JPEG / WebP，每张最多 5 MiB；上传时保存到本机，主动使用云端检查时才发送图片。"));
@@ -491,22 +797,52 @@ function renderCardImageEditor(card, draft) {
   if (app.cardEditBusy?.cardId === card.id && app.cardEditBusy.operation === "upload") section.append(text("p", "正在准备配图，请稍候…", "helper"));
   const list = el("div", { class: "card-image-list" });
   draft.images.forEach((reference, index) => {
-    const imageSource = CardImages.mediaFor(reference, app.data.media)?.source;
+    const mediaRecord = CardImages.mediaFor(reference, app.data.media);
+    const imageSource = mediaRecord?.source;
     const provenance = imageSource?.page ? text("p", `来源：PDF 第 ${imageSource.page} 页 · 校对版本 ${imageSource.revision}${imageSource.bbox ? " · 已记录裁剪范围" : " · 整页原图"}`, "helper") : null;
     const side = el("select", { disabled: busy, "aria-label": `第 ${index + 1} 张配图显示位置` }, el("option", { value: "answer", selected: reference.side === "answer" }, "答案侧 · 分析完成后查看"), el("option", { value: "question", selected: reference.side === "question" }, "题目侧 · 作答前可见"));
     side.addEventListener("change", () => { reference.side = side.value; markChanged(); toast("图片显示位置已改变。原位置的检查结论不再适用，请按新位置检查是否泄露答案。"); });
     const caption = el("input", { type: "text", maxlength: "500", value: reference.caption, disabled: busy, placeholder: "例如：入栈操作示意图", "aria-label": `第 ${index + 1} 张配图说明` });
     caption.addEventListener("input", () => { reference.caption = caption.value; touchCardDraft(card, draft, false); });
     const move = step => { const other = index + step; [draft.images[index], draft.images[other]] = [draft.images[other], draft.images[index]]; markChanged(); };
-    list.append(el("article", { class: "card-image-item" }, CardImages.thumbnail(reference, app.data.media, `配图 ${index + 1}`), el("div", { class: "card-image-options" }, provenance, field(`配图 ${index + 1} · 显示位置`, side), field("图片说明（可选）", caption), el("div", { class: "card-image-actions" }, button("上移", () => move(-1), "btn secondary small", busy || index === 0), button("下移", () => move(1), "btn secondary small", busy || index === draft.images.length - 1), button("移除", () => { draft.images.splice(index, 1); markChanged(); }, "btn danger small", busy)))));
+    list.append(el("article", { class: "card-image-item" }, CardImages.thumbnail(reference, app.data.media, `配图 ${index + 1}`), el("div", { class: "card-image-options" }, provenance, field(`配图 ${index + 1} · 显示位置`, side), field("图片说明（可选）", caption), ImageAutoReview.create({ card, draft, reference, media: mediaRecord, vision: app.data.image_check, api, busy }), el("div", { class: "card-image-actions" }, button("上移", () => move(-1), "btn secondary small", busy || index === 0), button("下移", () => move(1), "btn secondary small", busy || index === draft.images.length - 1), button("移除", () => { draft.images.splice(index, 1); markChanged(); }, "btn danger small", busy)))));
   });
-  section.append(list, text("p", "上传只是准备配图。请点击「保存草稿」或「核对并批准」，将当前文字、配图位置与说明一起保存到卡片。", "helper card-image-save-note"));
-  if (draft.images.length) section.append(text("p", "答题诊断仍依据文字和评分要点。配图可在推荐区单独进行视觉检查；请把解题所需的图中条件写入问题，并把判断依据写入评分要点。", "notice card-image-ai-note"));
+  const eligible = ImageAutoReview.eligibleImages(card, draft, app.data.media);
+  if (eligible.length > 1) section.append(button(`批量自动检查已保存配图 · ${eligible.length} 张`, async () => {
+    if (!window.confirm(`将依次把 ${eligible.length} 张配图的最终裁图、对应讲义原页和卡片文字发送到配置的云端模型，可能消耗 API 额度。是否开始？`)) return;
+    await cardEditOperation(card, "image_check", async () => {
+      let completed = 0, failed = 0;
+      for (const reference of eligible) {
+        try {
+          await api(ImageAutoReview.endpoint(card, reference), jsonOptions("POST", { card_version: card.version }));
+          completed += 1;
+        } catch { failed += 1; }
+      }
+      toast(`配图检查完成 ${completed} 张${failed ? `，${failed} 张未完成，请单独重试` : ""}。结果只用于配图筛查。`, Boolean(failed));
+    });
+  }, "btn secondary small", busy || !app.data.image_check?.available));
+  section.append(list, text("p", "上传只是准备配图。点击「保存并检查」后，当前文字、配图位置与说明会一起保存。", "helper card-image-save-note"));
+  if (draft.images.length) section.append(text("p", "保存后会依次检查配图和卡片内容，全部通过即可学习。答题诊断仍依据文字和评分要点；请把解题所需的图中条件写入问题。", "notice card-image-ai-note"));
   return section;
+}
+function reloadSavedCard(card, draft) {
+  if (draft.dirty && !window.confirm("载入最新版本将替换当前未保存编辑。请先复制保留需要的修改，是否继续？")) return;
+  cardEditOperation(card, "reload", async () => {
+    const latest = await api("/api/state");
+    const saved = latest.cards?.find(item => item.id === card.id);
+    if (!saved) throw new Error("这张卡片已不可用，请返回学习材料检查。");
+    app.data = latest;
+    delete app.cardDrafts[card.id];
+    if (app.cardEditConflicts) delete app.cardEditConflicts[card.id];
+    Object.assign(cardEditDraft(saved), { previewSide: draft.previewSide, sourcePage: draft.sourcePage });
+    toast("已载入最新保存的文字和配图。");
+    scheduleReviewPoll();
+  });
 }
 function renderCardEditor(card) {
   const draft = cardEditDraft(card);
   const busy = Boolean(app.cardEditBusy);
+  const auditing = app.studioStage === "audit";
   const question = el("textarea", { rows: "3", required: true, maxlength: "2000", value: draft.question, disabled: busy });
   const answer = el("textarea", { rows: "4", required: true, maxlength: "4000", value: draft.answer, disabled: busy });
   const concept = el("input", { required: true, maxlength: "100", value: draft.concept, disabled: busy });
@@ -518,7 +854,7 @@ function renderCardEditor(card) {
   }
   const errorNode = text("div", app.cardEditErrors[card.id] || "", "inline-error");
   errorNode.setAttribute("role", "alert");
-  const form = el("form", { class: "workbench-form" }, card.is_demo ? text("p", "自编演示卡片 · 请核对讲义后批准", "helper") : null, field("问题", question), field("参考答案", answer), el("div", { class: "field-row" }, field("知识概念", concept), field("卡片用途", kind)), renderCardImageEditor(card, draft), renderRubricFields(card, draft, busy), renderEvidenceFields(card, draft, busy));
+  const form = el("form", { class: "workbench-form" }, card.is_demo ? text("p", "自编演示卡片 · 可手动确认体验练习流程", "helper") : null, field("问题", question), field("参考答案", answer), el("div", { class: "field-row" }, field("知识概念", concept), field("卡片用途", kind)), renderCardImageEditor(card, draft), renderRubricFields(card, draft, busy), renderEvidenceFields(card, draft, busy));
   if (app.cardEditConflicts?.[card.id]) form.prepend(el("div", { class: "notice warning" }, text("p", "保存版本冲突。请先保留你需要的修改，再载入最新版本重新编辑。"), button("载入最新版本", () => {
     if (!window.confirm("载入最新版本将替换这张卡片当前未保存的编辑。请先复制保留需要的内容，是否继续？")) return;
     cardEditOperation(card, "reload", async () => {
@@ -530,11 +866,13 @@ function renderCardEditor(card) {
       toast("已载入最新保存的版本。");
     });
   }, "btn secondary small", busy)));
-  if (card.source_outdated) form.prepend(note("这张卡片引用的原文已更新，已退回待审核。请对照最新原文更新答案与引用，或重新生成卡片。旧引用与历史练习仍然保留。", "warning"));
+  if (card.source_outdated) form.prepend(note("这张卡片引用的原文已更新，已退回待处理。请对照最新原文更新答案与引用，或重新生成卡片。旧引用与历史练习仍然保留。", "warning"));
   if (draft.version !== card.version) form.prepend(note("卡片已有新版本。你的草稿仍保留，保存时会校验版本，避免覆盖其他窗口的修改。", "warning"));
   form.addEventListener("submit", event => event.preventDefault());
   const controls = el("div", { class: "form-actions workbench-save-actions" });
-  for (const [status, label, style] of [["draft", "保存草稿", "btn secondary"], ["rejected", "拒绝", "btn danger"], ["approved", "核对并批准", "btn"]]) {
+  const manual = el("details", { class: "manual-review-options", "data-manual-review": "true", hidden: card.status === "approved" || ["queued", "running"].includes(card.review_state) }, text("summary", "自行核对并处理"), text("p", "机器无法确认时，可对照讲义修正后重新检查，也可自行核对后手动批准。", "helper"));
+  const actions = auditing ? [["draft", "保存并检查", "btn"], ["rejected", "拒绝", "btn danger"], ["approved", "人工核对并批准", "btn secondary"]] : [["draft", "保存并检查", "btn"]];
+  for (const [status, label, style] of actions) {
     const btn = button(label, () => {
       if (app.cardEditBusy || !form.reportValidity()) return;
       cardEditOperation(card, "save", async () => {
@@ -556,15 +894,49 @@ function renderCardEditor(card) {
         delete app.cardDrafts[card.id];
         if (app.cardEditConflicts) delete app.cardEditConflicts[card.id];
         Object.assign(cardEditDraft(saved), { previewSide, sourcePage });
-        toast(saved.status === "approved" ? "卡片已批准，可以练习和导出。" : saved.status === "rejected" ? "卡片已标记为拒绝。" : status === "approved" ? "新配图已保存，卡片已退回待审核。请核对后再次批准。" : "卡片草稿已保存。");
+        toast(saved.status === "approved" ? `${cardStatusLabel(saved)}，可以练习和导出。` : saved.status === "rejected" ? "卡片已标记为拒绝。" : ["queued", "running"].includes(saved.review_state) ? "修改已保存，正在自动检查；检查失败也会保留卡片。" : "卡片已保存，可在检查结果中继续处理。");
       });
     }, style, busy);
-    controls.append(btn);
+    if (status === "draft") controls.append(btn); else manual.append(btn);
   }
-  form.append(el("div", { class: "workbench-save-bar" }, text("p", draft.dirty ? "有未保存的修改" : `已保存 · 版本 ${card.version}`, "helper"), errorNode, controls));
+  {
+    const autoReview = CardAutoReview.create({ card, draft, api, configured: modeIsCloud(), busy,
+      checking: app.cardEditBusy?.cardId === card.id && app.cardEditBusy.operation === "auto_review",
+      run: callback => cardEditOperation(card, "auto_review", callback),
+      onRead: result => {
+        const saved = result.card;
+        if (saved?.id === card.id && saved.version >= card.version) {
+          for (const key of Object.keys(card)) if (!(key in saved)) delete card[key];
+          Object.assign(card, saved);
+          updateReviewIndicators();
+          scheduleReviewPoll();
+        }
+      },
+      onChecked: async result => {
+        app.data = await api("/api/state");
+        toast(result.status === "auto_pass" && result.current === true
+          ? "机器审核通过，可以开始学习。" : ["queued", "running"].includes(result.status) ? "已开始自动检查。" : "检查结果已保存。有疑点的卡片仍保留为草稿，可修改后再试。");
+      },
+      onStudy: () => { app.practiceId = card.id; app.practiceFilter = "all"; setView("practice"); },
+      onLocate: blockId => {
+        const block = app.data.blocks.find(item => item.block_id === blockId && item.document_id === card.document_id);
+        if (!block) return toast("这段原文已不可用，请重新打开讲义核对。", true);
+        draft.sourcePage = block.page;
+        app.reviewPane = "source";
+        render();
+        document.querySelector(".workbench-source")?.scrollIntoView({ block: "start", behavior: "instant" });
+      }
+    });
+    if (auditing) form.classList.add("studio-audit-form");
+    form.insertBefore(autoReview, form.querySelector(".field"));
+  }
+  if (!auditing) controls.append(button("查看检查结果 →", () => setStudioStage("audit"), "btn secondary", busy));
+  form.append(el("div", { class: "workbench-save-bar" }, text("p", draft.dirty ? "有未保存的修改" : `已保存 · 版本 ${card.version}`, "helper"), errorNode, controls, text("p", modeIsCloud() ? automaticReviewNotice : "演示模式不会调用云端检查，可在检查结果中自行核对并批准。", "helper automatic-review-notice")));
+  if (auditing) form.append(manual);
   form.querySelector(".workbench-save-bar .helper").id = "workbench-save-status";
   if (app.cardEditBusy?.cardId === card.id && app.cardEditBusy.operation === "save") form.append(text("p", "正在保存卡片与配图…", "helper"));
-  const editor = panel("编辑卡片", `版本 ${card.version || 1} · ${statusNames[card.status]}`, form);
+  const editor = panel(auditing ? "检查与处理" : "编辑卡片", `版本 ${card.version || 1} · ${cardStatusLabel(card)}`, form);
+  editor.querySelector(".panel-header .meta").id = "workbench-card-status";
   editor.classList.add("workbench-editor");
   return el("div", { class: "workbench-grid", "data-card-id": card.id, "data-pane": app.reviewPane || "editor" }, renderWorkbenchSources(card, draft), editor, renderWorkbenchPreview(card, draft));
 }
@@ -649,7 +1021,7 @@ function renderPractice() {
   const page = el("div", {}, heading("03 / 主动回忆", "把记住的，变成理解的", "先用自己的话回答，再对照反馈和讲义，补上遗漏的知识点。"));
   page.append(renderPracticeOverview(approved, progress));
   if (!approved.length && !app.attempt) {
-    page.append(panel("练习空间", null, empty("先批准一张你信任的卡片", "到卡片审核页对照原文核对答案。原文更新后，相关卡片也需要重新审核。", button("去审核卡片  →", () => setView("review")), "◎")));
+    page.append(panel("练习空间", null, empty("还没有可学习的卡片", "新卡片会自动检查，通过后即可学习。有疑点的卡片可在检查结果中处理。", button("查看检查结果  →", () => setView("review")), "◎")));
     const history = renderRecentAttempts();
     if (history) { history.classList.add("practice-history-only"); page.append(history); }
     return page;
@@ -867,7 +1239,7 @@ function renderExport() {
   const imageCards = approved.filter(card => CardImages.refs(card).length);
   const hasImages = imageCards.length > 0;
   const page = el("div", {}, heading("04 / 长期复习", "把理解，留给未来的自己", "将已批准的卡片导入 Anki，安排后续复习。来源与本机练习链接会一并保留。"));
-  page.append(el("div", { class: "stats" }, ...[[approved.length, "可导出的已批准卡片"], [cards.filter(c => c.status === "draft").length, "仍待人工审核"], [approved.filter(c => c.kind === "remediation").length, "其中的补充练习"]].map(([n, desc]) => el("div", { class: "stat" }, text("div", String(n).padStart(2, "0"), "stat-number"), text("p", desc)))));
+  page.append(el("div", { class: "stats" }, ...[[approved.length, "可导出的已批准卡片"], [cards.filter(c => c.status === "draft").length, "检查中或待处理"], [approved.filter(c => c.kind === "remediation").length, "其中的补充练习"]].map(([n, desc]) => el("div", { class: "stat" }, text("div", String(n).padStart(2, "0"), "stat-number"), text("p", desc)))));
   const errorNode = el("p", { class: "inline-error", role: "alert" });
   const downloadButton = (label, path, filename, primary = false) => {
     const btn = button(label, () => actionWithButton(btn, "正在打包…", async () => {
@@ -900,9 +1272,9 @@ function renderExport() {
         el("li", {}, text("strong", "重复导入按 NoteID 更新"), text("div", "保持首列 NoteID 和笔记类型一致，核对字段映射，选择更新已有笔记。", "helper"))),
       el("table", { class: "field-table" }, el("thead", {}, el("tr", {}, text("th", "字段顺序"), text("th", "内容"))), el("tbody", {}, ...fieldRows.map(([name, description], index) => el("tr", {}, text("td", `${index + 1}. ${name}`), text("td", description)))))));
   const instructions = el("div", {}, el("ol", { class: "steps-list" },
-    el("li", {}, text("strong", "下载 APKG 牌组包"), text("div", "先审核并批准卡片，再点击左侧下载按钮。已保存的配图会自动随卡片打包。", "helper")),
+    el("li", {}, text("strong", "下载 APKG 牌组包"), text("div", "卡片检查通过后，点击左侧下载按钮。已保存的配图会自动随卡片打包。", "helper")),
     el("li", {}, text("strong", "在 Anki 中导入文件"), text("div", "打开 Anki，点击「导入文件」，选择 ankisense-approved.apkg。导入后进入 AnkiSense 牌组开始复习。", "helper")),
-    el("li", {}, text("strong", "修改后，再次导入更新"), text("div", "在网页修改、批准并重新导出同一卡片。导入时可将更新笔记设为「始终」，以网页内容更新；这会覆盖你直接在 Anki 中修改的字段。不要启用「导入任何学习进度」。", "helper"))),
+    el("li", {}, text("strong", "修改后，再次导入更新"), text("div", "在网页修改、检查通过并重新导出同一卡片。导入时可将更新笔记设为「始终」，以网页内容更新；这会覆盖你直接在 Anki 中修改的字段。不要启用「导入任何学习进度」。", "helper"))),
     text("p", "如果之前用 TSV 导入过相同卡片，首次改用 APKG 可能出现两份笔记；两种格式的已有笔记不会自动合并。", "helper"),
     text("p", "卡片上的「用自己的话回答」会打开本机 AnkiSense，需要网页服务正在运行；在其他设备上不能直接使用这个本机链接。", "helper"),
     alternativeFormats);
@@ -910,7 +1282,7 @@ function renderExport() {
   return page;
 }
 
-for (const nav of document.querySelectorAll("[data-view]")) nav.addEventListener("click", () => setView(nav.dataset.view));
+for (const nav of document.querySelectorAll("[data-view]")) nav.addEventListener("click", () => nav.dataset.view === "materials" ? setStudioStage(app.studioStage || "source") : setView(nav.dataset.view));
 async function initialize() {
   try {
     const params = new URLSearchParams(window.location.search);

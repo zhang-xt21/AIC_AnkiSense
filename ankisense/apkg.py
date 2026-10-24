@@ -19,7 +19,7 @@ from fastapi import HTTPException
 from .evidence import validate_card
 from .media import EXPORT_COLUMNS, MAX_EXPORT_BYTES, MAX_UPLOAD_BYTES, html_text, normalize_image, require_media
 from .schemas import CardDraft, SourceBlock
-from .sources import page_id, require_current_reviewed
+from .approval import require_approved_sources, require_image_source
 
 # A released model's ID, field order and template ordinals must remain stable.
 MODEL_ID = 1786831001
@@ -139,8 +139,10 @@ def require_exportable(card, store):
         raise HTTPException(409, "卡片引用的原文已更新，请重新审核后导出。")
     try:
         blocks = []
-        for evidence in card["evidence"]:
-            block = store.get("blocks", evidence["block_id"])
+        # Several distinct quotations may legitimately cite the same block.
+        # Load each source once; validate_card still checks every quotation.
+        for identifier in dict.fromkeys(evidence["block_id"] for evidence in card["evidence"]):
+            block = store.get("blocks", identifier)
             if block is None or block["document_id"] != card["document_id"]:
                 raise HTTPException(409, "卡片引用的原文缺失，请重新审核后导出。")
             blocks.append(SourceBlock.model_validate(block))
@@ -148,7 +150,7 @@ def require_exportable(card, store):
                                                if key in card}), blocks)
     except (KeyError, TypeError, ValueError) as error:
         raise HTTPException(409, "卡片内容或原文引用已失效，请重新审核后导出。") from error
-    require_current_reviewed(store, blocks)
+    require_approved_sources(store, card, blocks)
     for attachment in card.get("images") or []:
         try:
             media = store.get("media", attachment["media_id"])
@@ -163,10 +165,7 @@ def require_exportable(card, store):
             raise HTTPException(409, "卡片配图来源无效，请重新审核配图。")
         if source.get("document_id") != card["document_id"]:
             raise HTTPException(409, "卡片配图与讲义不一致，请重新审核配图。")
-        current = store.get("source_pages", page_id(card["document_id"], source.get("page")))
-        if (current is None or current.get("status") != "reviewed"
-                or current.get("revision") != source.get("revision")):
-            raise HTTPException(409, "配图所用的原文页已更新或未校对，请重新审核配图。")
+        require_image_source(store, card, media)
 
 
 def anki_model():

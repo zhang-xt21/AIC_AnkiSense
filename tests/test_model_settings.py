@@ -155,6 +155,9 @@ def test_pending_attempt_and_image_check_prevent_settings_change(factory):
     client.app.state.image_checks.running["fake-check"] = object()
     assert update(client).status_code == 409
     client.app.state.image_checks.running.clear()
+    client.app.state.image_auto_review.running["fake-review"] = object()
+    assert update(client).status_code == 409
+    client.app.state.image_auto_review.running.clear()
     assert update(client).status_code == 200
 
 

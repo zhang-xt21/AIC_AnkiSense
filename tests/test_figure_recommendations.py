@@ -307,7 +307,7 @@ def test_restart_marks_interrupted_jobs_failed(context):
     assert recovered["status"] == "failed" and "重启" in recovered["message"]
 
 
-def test_missing_pdf_unreviewed_source_and_other_card_rejected_without_job(context):
+def test_missing_pdf_failed_source_and_other_card_rejected_without_job(context):
     client, card, _, storage = context
     assert start(client, {**card, "version": 9}).status_code == 409
     client.post("/api/demo")
@@ -315,12 +315,24 @@ def test_missing_pdf_unreviewed_source_and_other_card_rejected_without_job(conte
     assert start(client, demo).status_code == 422
     store = client.app.state.store
     page = store.get("source_pages", card["document_id"] + "-p2")
-    store.put("source_pages", {**page, "status": "pending"})
+    store.put("source_pages", {**page, "status": "failed"})
     assert start(client, card).status_code == 409
     store.put("source_pages", page)
     (storage / "uploads" / f"{card['document_id']}.pdf").unlink()
     assert start(client, card).status_code == 422
     assert store.all("figure_jobs") == []
+
+
+def test_current_pending_page_can_recommend_and_adopt_without_confirmation(context):
+    client, card, _, _ = context
+    store = client.app.state.store
+    page = store.get("source_pages", card["document_id"] + "-p2")
+    store.put("source_pages", {**page, "status": "pending", "reviewed_at": None})
+    job = completed(client, card)
+    adopted = adopt(client, card, job)
+    assert adopted.status_code == 200, adopted.text
+    assert adopted.json()["source"]["revision"] == page["revision"]
+    assert store.get("source_pages", page["id"])["status"] == "pending"
 
 
 def test_new_suggestion_preserves_explicit_rejected_status(context):

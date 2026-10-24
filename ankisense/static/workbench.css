@@ -69,6 +69,10 @@ main[data-view="review"] { max-width: 1880px; padding-inline: 22px; }
 .preview-image-count { text-align: center; margin-top: 15px; }
 .settings-navigation { margin-top: 22px; }
 .workbench-mobile-tabs { display: none; }
+.studio-audit-stage .card-auto-review { margin-top: 0; border-color: #bfd3c5; background: #f5faf6; }
+.studio-audit-stage .card-auto-review + .field { border-top: 1px solid var(--line); padding-top: 18px; }
+.studio-audit-stage .workbench-editor > .panel-body { scroll-padding-top: 12px; }
+.studio-audit-form .workbench-save-bar { border-top-color: #bfd3c5; }
 @media (max-width: 1350px) and (min-width: 981px) {
   .workbench-toolbar { grid-template-columns: minmax(0, 1fr) minmax(0, .85fr); }
   .workbench-pager { justify-content: flex-end; }

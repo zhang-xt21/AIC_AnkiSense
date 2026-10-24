@@ -265,7 +265,7 @@ async function assertNoKeyReadback() {
     assert.equal(await detachedPanel.evaluate(node => node.isConnected), false);
     assert.equal(await detachedPanel.evaluate(node => node.querySelector('[name="api_key"]').value), "");
     assert.equal(await page.locator(".model-settings").count(), 0);
-    assert.equal(await page.locator("#breadcrumb-current").innerText(), "学习材料");
+    assert.equal(await page.locator("#breadcrumb-current").innerText(), "讲义制卡");
     await detachedPanel.dispose();
     await page.unroute("**/api/settings/ai");
     await openSettings();

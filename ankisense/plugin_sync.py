@@ -16,7 +16,8 @@ from .apkg import (DECK_ID, DECK_NAME, _practice_url, anki_model, export_snapsho
 from .evidence import validate_card
 from .media import MAX_UPLOAD_BYTES, normalize_image, require_media
 from .schemas import CardUpdate, SourceBlock
-from .sources import page_id, require_current_reviewed
+from .approval import require_approved_sources, require_image_source
+from .sources import page_id
 
 
 PROTOCOL_VERSION = 1
@@ -72,7 +73,7 @@ class PluginSync:
             validate_card(draft, blocks)
             if card.get("source_outdated"):
                 raise HTTPException(409, "卡片引用的原文已更新，请重新审核后同步。")
-            require_current_reviewed(reader, blocks)
+            require_approved_sources(reader, card, blocks)
             return document, blocks
         except (ValueError, KeyError, TypeError) as error:
             raise HTTPException(409, "卡片内容或引用无效，请重新审核后同步。") from error
@@ -84,12 +85,6 @@ class PluginSync:
             # IDs constrain filenames; additionally refuse symlinks escaping storage.
             if path.resolve().parent != self.storage.resolve() / "media":
                 raise HTTPException(409, "图片文件位置异常，请重新添加图片。")
-            source = record.get("source") or {}
-            if source:
-                current = reader.get("source_pages", page_id(document_id, source.get("page")))
-                if (not current or current.get("status") != "reviewed"
-                        or current.get("revision") != source.get("revision")):
-                    raise HTTPException(409, "配图所用的原文页已更新或未校对，请重新审核配图。")
             with path.open("rb") as handle:
                 content = handle.read(MAX_UPLOAD_BYTES + 1)
             if len(content) > MAX_UPLOAD_BYTES or not content.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -116,6 +111,10 @@ class PluginSync:
         seen = set()
         for attachment in card.get("images") or []:
             identifier = attachment["media_id"]
+            media = reader.get("media", identifier)
+            if media is None:
+                raise HTTPException(409, "卡片配图记录缺失，请重新添加图片。")
+            require_image_source(reader, card, media)
             key = (identifier, card["document_id"])
             if key not in cache:
                 cache[key] = self._asset(reader, identifier, card["document_id"])

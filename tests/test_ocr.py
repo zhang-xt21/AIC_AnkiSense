@@ -177,7 +177,7 @@ def test_explicit_modes_override_automatic_page_routing(monkeypatch):
         ingest.parse_pdf_document(content, 1, 2, "unsupported")
 
 
-def test_pending_source_cannot_generate_or_approve_cards(client, monkeypatch):
+def test_pending_source_drafts_need_card_approval_but_not_page_confirmation(client, monkeypatch):
     document = import_scanned(client, monkeypatch)
     page = page_for(client, document)
     assert page["status"] == "pending"
@@ -185,19 +185,79 @@ def test_pending_source_cannot_generate_or_approve_cards(client, monkeypatch):
     assert page["revision"] == 1
     calls = stub_generate(client, monkeypatch)
     response = client.post("/api/card-drafts", json={"block_ids": page["block_ids"], "count": 1})
+    assert response.status_code == 200, response.text
+    assert len(calls) == 1
+    candidate = response.json()["cards"][0]
+    assert candidate["status"] == "draft"
+    assert page_for(client, document) == page, "Drafting must not pretend to confirm the source"
+    assert client.post("/api/attempts", json={"card_id": candidate["id"], "answer": "后进先出",
+                                              "request_id": "pending-source-001"}).status_code == 409
+    assert candidate["id"] not in client.get("/api/export").text
+    approved = update_card(client, candidate, status="approved")
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["approval"]["method"] == "human"
+    assert candidate["id"] in client.get("/api/export").text
+    assert page_for(client, document) == page
+
+
+@pytest.mark.parametrize("status", ["failed", "empty"])
+def test_failed_or_empty_page_cannot_generate_even_with_old_residual_text(client, monkeypatch, status):
+    document = import_scanned(client, monkeypatch)
+    page = page_for(client, document)
+    client.app.state.store.put("source_pages", {**page, "status": status})
+    calls = stub_generate(client, monkeypatch)
+    response = client.post("/api/card-drafts", json={"block_ids": page["block_ids"], "count": 1})
     assert response.status_code == 409, response.text
     assert calls == []
     assert state(client)["cards"] == []
 
-    # Imported/legacy clients must not bypass source review through the card API.
-    candidate = {"id": "unreviewed-source-card", "document_id": document["id"],
-                 "question": "栈遵循什么顺序？", "answer": "后进先出", "concept": "栈",
-                 "kind": "basic", "rubric": [{"point_id": "lifo", "text": "后进先出"}],
-                 "evidence": [{"block_id": page["block_ids"][0], "quote": "后进先出"}],
-                 "status": "draft", "version": 1, "is_demo": False}
-    client.app.state.store.put("cards", candidate)
-    assert update_card(client, candidate, status="approved").status_code == 409
-    assert client.app.state.store.get("cards", candidate["id"])["status"] == "draft"
+
+@pytest.mark.parametrize("edge_whitespace", ["", " \n"])
+def test_unchanged_confirmation_keeps_draft_citations_images_and_source_revision(client, monkeypatch, edge_whitespace):
+    from ankisense import ingest
+
+    original_text = edge_whitespace + OCR_TEXT + edge_whitespace
+    monkeypatch.setattr(ingest, "recognize_page", lambda content, page: recognition(page, original_text))
+    response = client.post("/api/documents", files={
+        "file": ("confirm.pdf", pdf_bytes([None]), "application/pdf")})
+    assert response.status_code == 200, response.text
+    document = response.json()
+    original = page_for(client, document)
+    store = client.app.state.store
+    blocks_before = {key: store.get("blocks", key) for key in original["block_ids"]}
+    stub_generate(client, monkeypatch)
+    draft = generate_card(client, document)
+    media_response = client.post("/api/card-media/from-page", json={
+        "document_id": document["id"], "page": 1, "revision": original["revision"]})
+    assert media_response.status_code == 200, media_response.text
+    media = media_response.json()
+    attached = update_card(client, draft, images=[{"media_id": media["id"], "side": "answer"}])
+    assert attached.status_code == 200, attached.text
+    draft = attached.json()
+
+    confirmed_response = save_page(client, document, original_text)
+    assert confirmed_response.status_code == 200, confirmed_response.text
+    confirmed = confirmed_response.json()
+    assert confirmed["revision"] == original["revision"]
+    assert confirmed["block_ids"] == original["block_ids"]
+    assert confirmed["text"] == original_text
+    assert confirmed["raw_text"] == original_text
+    assert confirmed["status"] == "reviewed"
+    assert confirmed["reviewed_at"]
+    assert confirmed["action"] == "proofread"
+    assert store.get("cards", draft["id"]) == draft
+    assert store.get("media", media["id"]) == media
+    assert {key: store.get("blocks", key) for key in original["block_ids"]} == blocks_before
+    history = client.get(f"/api/documents/{document['id']}/pages/1/revisions").json()["revisions"]
+    assert history == [{**confirmed, "id": f"{confirmed['id']}-r{confirmed['revision']}"}]
+
+    approved_response = update_card(client, draft, status="approved")
+    assert approved_response.status_code == 200, approved_response.text
+    approved = approved_response.json()
+    before = state(client)
+    assert save_page(client, document, original_text.strip()).json() == confirmed
+    assert state(client) == before
+    assert store.get("cards", approved["id"]) == approved
 
 
 def test_proofreading_preserves_recognition_and_creates_immutable_blocks(client, monkeypatch):
@@ -245,6 +305,34 @@ def test_simultaneous_proofreading_saves_cannot_overwrite_each_other(client, mon
     assert state(client) == previous
 
 
+def test_unchanged_confirmation_rechecks_revision_inside_transaction(client, monkeypatch):
+    document = import_scanned(client, monkeypatch)
+    assert save_page(client, document, OCR_TEXT).status_code == 200
+    revision = page_for(client, document)["revision"]
+    store = client.app.state.store
+    original_mutate = store.mutate
+    entered, release = Event(), Event()
+
+    def pause_first_write(build, check=None):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(timeout=10)
+        return original_mutate(build, check)
+
+    monkeypatch.setattr(store, "mutate", pause_first_write)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        repeated = pool.submit(save_page, client, document, OCR_TEXT, revision)
+        try:
+            assert entered.wait(timeout=10)
+            changed = save_page(client, document, CORRECTED_TEXT, revision)
+            assert changed.status_code == 200, changed.text
+        finally:
+            release.set()
+        response = repeated.result(timeout=10)
+    assert response.status_code == 409, response.text
+    assert page_for(client, document)["text"] == CORRECTED_TEXT
+
+
 def test_clearing_a_page_does_not_leave_active_citable_text(client, monkeypatch):
     document = import_scanned(client, monkeypatch)
     old_page = page_for(client, document)
@@ -275,13 +363,14 @@ def test_first_confirmation_of_empty_ocr_page_is_recorded_then_idempotent(client
     confirmed = save_page(client, document, "")
     assert confirmed.status_code == 200, confirmed.text
     page = page_for(client, document)
-    assert page["revision"] == original["revision"] + 1
+    assert page["revision"] == original["revision"]
     assert page["reviewed_at"]
     assert page["status"] == "empty"
     assert page["block_ids"] == []
     history_url = f"/api/documents/{document['id']}/pages/1/revisions"
     history_before = client.get(history_url).json()
-    assert len(history_before["revisions"]) == 2
+    assert len(history_before["revisions"]) == 1
+    assert history_before["revisions"][0]["reviewed_at"] == page["reviewed_at"]
     assert save_page(client, document, "").status_code == 200
     assert page_for(client, document) == page
     assert client.get(history_url).json() == history_before
@@ -312,9 +401,11 @@ def test_oversized_proofreading_edit_is_rejected_without_mutation(client, monkey
     assert state(client) == before
 
 
-def test_source_edit_during_generation_discards_stale_ai_result(client, monkeypatch):
+@pytest.mark.parametrize("initially_reviewed", [False, True])
+def test_source_edit_during_generation_discards_stale_ai_result(client, monkeypatch, initially_reviewed):
     document = import_scanned(client, monkeypatch)
-    assert save_page(client, document, OCR_TEXT).status_code == 200
+    if initially_reviewed:
+        assert save_page(client, document, OCR_TEXT).status_code == 200
     page = page_for(client, document)
     entered, release = Event(), Event()
 
@@ -339,6 +430,35 @@ def test_source_edit_during_generation_discards_stale_ai_result(client, monkeypa
         response = future.result(timeout=10)
     assert response.status_code == 409, response.text
     assert state(client)["cards"] == []
+
+
+def test_unchanged_confirmation_during_generation_keeps_result_current(client, monkeypatch):
+    document = import_scanned(client, monkeypatch)
+    page = page_for(client, document)
+    stub_generate(client, monkeypatch)
+    generate = client.app.state.ai.generate_drafts
+    entered, release = Event(), Event()
+
+    async def delayed_generate(blocks, count):
+        entered.set()
+        assert await asyncio.to_thread(release.wait, 10)
+        return await generate(blocks, count)
+
+    monkeypatch.setattr(client.app.state.ai, "generate_drafts", delayed_generate)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client.post, "/api/card-drafts", json={"block_ids": page["block_ids"], "count": 1})
+        try:
+            assert entered.wait(timeout=10)
+            confirmed = save_page(client, document, OCR_TEXT)
+            assert confirmed.status_code == 200, confirmed.text
+        finally:
+            release.set()
+        response = future.result(timeout=10)
+    assert response.status_code == 200, response.text
+    assert page_for(client, document)["revision"] == page["revision"]
+    card = response.json()["cards"][0]
+    assert card["status"] == "draft"
+    assert update_card(client, card, status="approved").status_code == 200
 
 
 def test_draft_update_cannot_erase_concurrent_source_outdated_marker(client, monkeypatch):
@@ -475,8 +595,8 @@ def test_successful_ocr_retry_clears_stale_error_and_model_metadata(client, monk
     assert retried["raw_text"] == OCR_TEXT
     assert not retried.get("reviewed_at")
     calls = stub_generate(client, monkeypatch)
-    assert client.post("/api/card-drafts", json={"block_ids": retried["block_ids"], "count": 1}).status_code == 409
-    assert calls == []
+    assert client.post("/api/card-drafts", json={"block_ids": retried["block_ids"], "count": 1}).status_code == 200
+    assert len(calls) == 1
 
     assert save_page(client, document, CORRECTED_TEXT).status_code == 200
     confirmed = page_for(client, document)
@@ -485,7 +605,7 @@ def test_successful_ocr_retry_clears_stale_error_and_model_metadata(client, monk
     assert confirmed["error"] is None
     assert confirmed["raw_text"] == OCR_TEXT
     generate_card(client, document)
-    assert len(calls) == 1
+    assert len(calls) == 2
     history = client.get(f"/api/documents/{document['id']}/pages/1/revisions").json()["revisions"]
     historical_failure = next(item for item in history if item["revision"] == failed["revision"])
     assert historical_failure["status"] == "failed"
@@ -511,6 +631,26 @@ def test_outdated_rerecognition_request_never_runs_engine(client, monkeypatch):
     assert state(client) == before
 
 
+def test_rerecognition_advances_revision_even_when_text_is_identical(client, monkeypatch):
+    module = importlib.import_module("ankisense.app")
+    document = import_scanned(client, monkeypatch)
+    assert save_page(client, document, OCR_TEXT).status_code == 200
+    original = page_for(client, document)
+    stub_generate(client, monkeypatch)
+    card = generate_card(client, document)
+    monkeypatch.setattr(module, "recognize_page", lambda content, page: recognition(page))
+    response = client.post(f"/api/documents/{document['id']}/pages/1/ocr",
+                           json={"revision": original["revision"]})
+    assert response.status_code == 200, response.text
+    current = response.json()
+    assert current["revision"] == original["revision"] + 1
+    assert current["text"] == original["text"]
+    assert current["status"] == "pending"
+    assert not current.get("reviewed_at")
+    assert set(current["block_ids"]).isdisjoint(original["block_ids"])
+    assert client.app.state.store.get("cards", card["id"])["source_outdated"] is True
+
+
 def test_rerecognition_has_its_own_raw_result_and_retains_earlier_revisions(client, monkeypatch):
     module = importlib.import_module("ankisense.app")
     document = import_scanned(client, monkeypatch)
@@ -533,7 +673,7 @@ def test_rerecognition_has_its_own_raw_result_and_retains_earlier_revisions(clie
     assert revisions[corrected["revision"]]["raw_text"] == OCR_TEXT
     assert revisions[current["revision"]]["raw_text"] == new_raw
     stub_generate(client, monkeypatch)
-    assert client.post("/api/card-drafts", json={"block_ids": current["block_ids"], "count": 1}).status_code == 409
+    assert client.post("/api/card-drafts", json={"block_ids": current["block_ids"], "count": 1}).status_code == 200
 
 
 def test_original_image_only_exposes_imported_pdf_pages(client):

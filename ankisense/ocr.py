@@ -170,6 +170,28 @@ def recognize_page(content: bytes, page: int) -> dict:
                 text = ""
             else:
                 text = "\n".join(str(line) for line in lines)
+            # Keep per-line scores and pixel coordinates for local triage.
+            # A missing line has no score: high confidence is never completeness.
+            from math import isfinite
+            scores = getattr(recognition, "scores", None)
+            boxes = getattr(recognition, "boxes", None)
+            metadata = []
+            for index, line in enumerate(lines if lines is not None else []):
+                item = {"text": str(line)}
+                try:
+                    score = float(scores[index])
+                    if isfinite(score) and 0 <= score <= 1:
+                        item["confidence"] = round(score, 4)
+                except (IndexError, TypeError, ValueError):
+                    pass
+                try:
+                    box = [[round(float(coordinate), 2) for coordinate in point] for point in boxes[index]]
+                    if len(box) == 4 and all(len(point) == 2 and all(isfinite(v) for v in point) for point in box):
+                        item["bbox_pixels"] = box
+                except (IndexError, TypeError, ValueError):
+                    pass
+                metadata.append(item)
+            result["ocr_lines"] = metadata
             result.update(text=text, raw_text=text, status="pending" if text.strip() else "empty")
             return result
     except LocalOCRError as error:

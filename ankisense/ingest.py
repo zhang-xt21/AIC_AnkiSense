@@ -125,7 +125,7 @@ def parse_pdf_document(content: bytes, start: int = 1, end: int | None = None,
     # Separate proofreading imports from legacy documents and from forced OCR.
     digest = hashlib.sha256(content + f":{start}:{end}:proof-v1:{mode}".encode()).hexdigest()[:24]
     document_id = f"pdf-{digest}"
-    warning = "请逐页对照原图校对并确认，再选择片段制卡；页码为 PDF 物理页码。OCR 可能误识别公式、符号、表格和阅读顺序。"
+    warning = "可直接按讲义制卡并自动检查，逐页核对原文是可选操作。页码为 PDF 物理页码，OCR 可能误识别公式、符号、表格和阅读顺序。"
     failed = [str(page["page"]) for page in pages if page["status"] == "failed"]
     empty = [str(page["page"]) for page in pages if page["status"] == "empty"]
     if failed:

@@ -13,7 +13,7 @@ from .evidence import validate_card, validate_diagnosis
 from .llm import AIError
 from .prompts import DIAGNOSE_PROMPT_VERSION
 from .schemas import CardDraft, SourceBlock
-from .sources import require_current_reviewed
+from .approval import require_approved_sources
 
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ class AttemptService:
         if card.get("source_outdated"):
             raise HTTPException(409, "题目的原文已更新，请更新引用并重新审核卡片。")
         blocks = self._sources(card)
-        require_current_reviewed(self.store, blocks)
+        require_approved_sources(self.store, card, blocks)
         return blocks
 
     @staticmethod

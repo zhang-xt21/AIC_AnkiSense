@@ -8,7 +8,13 @@ import io
 import json
 import logging
 import sys
-from urllib.parse import urlsplit
+from pathlib import Path
+
+# This worker is launched as a script by the isolated Docling environment.
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from ankisense.model_policy import generation_options
 
 from PIL import Image
 
@@ -19,13 +25,7 @@ FINISH_REASONS = {"stop", "length", "content_filter", "tool_calls", "insufficien
 def generation_params(endpoint, model):
     params = {"model": model, "temperature": .1, "max_tokens": MAX_OUTPUT_TOKENS,
               "response_format": {"type": "json_object"}}
-    url = urlsplit(endpoint)
-    # Official docs (2026-09-27) specify thinking defaults to enabled. This
-    # compact schema task deliberately uses non-thinking mode on these two
-    # documented models. Do not send vendor extensions to proxies/providers.
-    if (url.scheme == "https" and url.hostname == "api.deepseek.com"
-            and url.port in {None, 443} and model in {"deepseek-flash", "deepseek-v4-pro"}):
-        params["thinking"] = {"type": "disabled"}
+    params.update(generation_options(endpoint, model))
     return params
 
 
