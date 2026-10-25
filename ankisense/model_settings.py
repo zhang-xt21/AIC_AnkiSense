@@ -184,6 +184,11 @@ def install_model_settings(app, configuration):
         except (ValueError, TypeError, RecursionError):
             raise HTTPException(422, "模型设置 JSON 格式不正确。") from None
         try:
+            if not isinstance(data, dict):
+                raise ValueError("模型设置须为 JSON 对象。")
+            resume = data.pop("resume_active_jobs", False)
+            if type(resume) is not bool:
+                raise ValueError("保存后继续制卡须为开关选项。")
             updated = parse_update(data, app.state.settings)
         except ValueError as error:
             # These validation messages contain fixed text, never submitted values.
@@ -192,12 +197,47 @@ def install_model_settings(app, configuration):
                 or app.state.image_checks.running or app.state.image_auto_review.running
                 or app.state.card_auto_review.running or app.state.generation_jobs.running
                 or app.state.automatic_illustrations.running
-                or any(item.get("status") in {"pending", "running"} for item in app.state.store.all("auto_card_jobs"))
-                or any(item.get("status") in {"pending", "running"} for item in app.state.store.all("material_imports"))
                 or any(item.get("status") == "pending" for item in app.state.store.all("attempts"))):
-            raise HTTPException(409, "已有生成或分析在进行，请等待完成后再保存模型设置。")
-        # No await between checking requests, persisting, and replacing settings:
-        # the single-process local service cannot start an analysis mid-update.
+            raise HTTPException(409, "已有生成、答题分析或独立图片检查在进行，请等待完成后再保存模型设置。")
+        active_jobs = [job for job in app.state.store.all("auto_card_jobs") if job.get("status") in {"pending", "running"}]
+        pending_imports = [item for item in app.state.store.all("material_imports")
+                           if not item.get("job_id") and item.get("status") in {"pending", "running"}]
+        if (active_jobs or pending_imports) and not resume:
+            raise HTTPException(409, "制卡正在进行；请勾选「保存后用新模型继续当前制卡」，或先取消任务再保存。")
+        if (active_jobs or pending_imports) and (updated.mode != "cloud" or not public_settings(updated)["configured"]):
+            raise HTTPException(422, "继续制卡需要完整的云端配置；切换演示模式或清除密钥前，请先取消制卡任务。")
+        restart_jobs = active_jobs if updated != app.state.settings else []
+        app.state.model_settings_switching = True
+        try:
+            for job in restart_jobs:
+                await app.state.auto_cards.cancel(job["id"])
+            apply_settings(updated)
+        except HTTPException as error:
+            if restart_jobs:
+                raise HTTPException(error.status_code, "设置未保存；当前制卡已暂停，已保存卡片保留。请修正后保存，并在结果页继续任务。") from None
+            raise
+        finally:
+            app.state.model_settings_switching = False
+        result = {**public_settings(updated), "connection": app.state.model_connection}
+        if resume:
+            resumed, not_resumed = [], []
+            # Only jobs active when the user saved are restarted. Existing
+            # partial/failed/completed/cancelled jobs remain explicit actions.
+            for job in restart_jobs:
+                try:
+                    await app.state.auto_cards._retry(job["id"], allow_model_change=True)
+                    resumed.append(job["id"])
+                except Exception:
+                    not_resumed.append(job["id"])
+            result["task_switch"] = {"resumed": len(resumed), "not_resumed": len(not_resumed),
+                                     "preparing": len(pending_imports)}
+            if active_jobs and not restart_jobs:
+                result["task_switch"]["unchanged"] = len(active_jobs)
+        return result
+
+    def apply_settings(updated):
+        # New writes are gated during the switch. Persist before replacing
+        # adapters so a failed save leaves the runtime configuration intact.
         configuration.save(updated)
         app.state.settings = updated
         app.state.ai = AIService(updated)

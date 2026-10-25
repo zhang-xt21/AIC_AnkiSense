@@ -63,6 +63,7 @@ test("connection verification requires an explicit capability even on a backend 
       assert.equal(result.ready, capability === true);
       if (!result.ready) assert.match(result.reason, /退出旧版/);
       assert.equal((await probeBackend({ requireAnkiSetup: true })).ready, true);
+      assert.equal((await probeBackend({ requireTaskSwitch: true })).ready, false);
     }
   } finally { http.get = original; }
 });

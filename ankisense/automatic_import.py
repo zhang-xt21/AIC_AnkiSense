@@ -193,7 +193,7 @@ class AutomaticImportService:
                     records.extend(page_records(doc_id, page))
                 self.store.mutate(lambda: [] if self.store.get("documents", doc_id) else records)
                 self.update(identifier, document_id=doc_id, message="讲义已识别，正在自动启动制卡。")
-                while any(j["status"] in ACTIVE for j in self.store.all("auto_card_jobs")):
+                while self.cards.settings_switching() or any(j["status"] in ACTIVE for j in self.store.all("auto_card_jobs")):
                     self.update(identifier, message="讲义已就绪，正在等待前一份材料处理完成。")
                     await asyncio.sleep(1)
                 options = record.get("options") or {}

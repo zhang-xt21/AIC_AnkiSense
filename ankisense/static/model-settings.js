@@ -24,7 +24,7 @@
       : settings.configured ? `云端模式 · ${settings.model || "已配置模型"} · ${label}` : "云端模式 · 待补全配置";
     target.title = settings.mode === "demo" ? "使用本地规则，无需连接模型。"
       : connection.checked_at ? `上次验证：${new Date(connection.checked_at).toLocaleString()}。${connection.message || ""} 验证结果不代表持续在线。`
-        : "请在模型设置中验证连接；保存配置不会发起模型请求。";
+        : "请在模型设置中验证连接；若保存后继续制卡，任务会按新配置发起模型请求。";
   }
 
   function create({ api, jsonOptions, onSaved, onConnection } = {}) {
@@ -137,7 +137,12 @@
     timeout.required = true;
     timeout.addEventListener("invalid", () => { advanced.open = true; });
     advanced.append(field("请求超时（秒）", timeout, "可设置 1–180 秒。模型响应较慢时，可适当增加等待时间。"));
-    const storageNote = node("p", "helper model-settings-storage", "配置与密钥保存在本机配置文件中，不写入浏览器存储，读取设置时不会返回密钥。请妥善保管本机配置文件。保存只更新设置，不会请求模型或验证连通性。");
+    const storageNote = node("p", "helper model-settings-storage", "配置与密钥保存在本机配置文件中，不写入浏览器存储，读取设置时不会返回密钥。仅保存配置不会验证连通性；若勾选继续当前制卡，保存后会自动续跑任务。");
+    const resumeJobs = node("input");
+    resumeJobs.type = "checkbox"; resumeJobs.name = "resume_active_jobs"; resumeJobs.checked = true;
+    const resumeLabel = node("label", "model-settings-clear-key");
+    resumeLabel.append(resumeJobs, node("span", "", "保存后用新模型继续当前制卡"));
+    const resumeHint = node("p", "helper", "若当前有制卡任务，先停止旧请求，再用新配置继续未完成部分，已生成卡片保留。续跑会把所需原文与原页发送给新配置的模型并消耗额度；不会重启以前已结束或手动取消的任务。");
     const save = node("button", "btn", "保存设置");
     save.type = "submit";
     const test = node("button", "btn secondary", "验证连接");
@@ -152,7 +157,7 @@
     let connectionPoll;
     const actions = node("div", "model-settings-actions");
     actions.append(save, test, testHint);
-    controls.append(modeGroup, modeHint, connection, advanced, storageNote, actions, testNote, connectionResult);
+    controls.append(modeGroup, modeHint, connection, advanced, storageNote, resumeLabel, resumeHint, actions, testNote, connectionResult);
     form.append(controls);
     body.append(loading, error, retry, feedback, form);
     panel.append(header, body);
@@ -202,13 +207,16 @@
         : "演示模式使用本地规则，不调用模型。你也可以先保存服务商配置，之后再切换到自配 API。";
     }
     function updateKeyState() {
+      let changedServer = false;
+      try { changedServer = Boolean(savedSettings?.base_url) && new URL(baseUrl.value).origin !== new URL(savedSettings.base_url).origin; } catch { /* URL validation reports invalid input separately. */ }
       clearKeyLabel.hidden = !keyConfigured;
       key.disabled = busy || clearKey.checked;
       keyStatus.textContent = keyConfigured ? "已保存" : "未配置";
       keyStatus.className = `pill model-settings-key-status${keyConfigured ? " green" : ""}`;
-      key.placeholder = clearKey.checked ? "保存后将清除已有密钥" : keyConfigured ? "留空保留已保存的密钥" : "粘贴你的 API Key";
+      key.placeholder = clearKey.checked ? "保存后将清除已有密钥" : keyConfigured && changedServer ? "接口服务器已变更，请重新填写 API Key" : keyConfigured ? "留空保留已保存的密钥" : "粘贴你的 API Key";
       keyHelp.textContent = clearKey.checked ? "已选择清除密钥；保存后云端模式需要重新配置密钥才能使用。"
-        : keyConfigured ? "已有密钥不会回显；只有需要替换时才填写。" : "密钥仅用于向你配置的服务商发起请求。可以先留空，稍后补充。";
+        : keyConfigured && changedServer ? "更换接口服务器后不能自动沿用旧密钥；请重新填写，或勾选清除已保存的密钥。"
+          : keyConfigured ? "已有密钥不会回显；只有需要替换时才填写。" : "密钥仅用于向你配置的服务商发起请求。可以先留空，稍后补充。";
     }
     function setBusy(value) {
       busy = value;
@@ -257,6 +265,7 @@
     form.addEventListener("input", () => {
       feedback.hidden = true;
       error.textContent = "";
+      updateKeyState();
       updateTestAvailability();
     });
     for (const radio of Object.values(modes)) radio.addEventListener("change", updateModeHint);
@@ -291,7 +300,8 @@
         model: model.value.trim(),
         timeout_seconds: Number(timeout.value),
         api_key: clearKey.checked ? "" : key.value.trim(),
-        clear_api_key: clearKey.checked
+        clear_api_key: clearKey.checked,
+        resume_active_jobs: resumeJobs.checked
       });
       // Keep the credential only in the pending request, never in saved UI state.
       key.value = "";
@@ -307,6 +317,13 @@
         feedback.textContent = settings.mode === "cloud" && !settings.configured
           ? "设置已保存。API 地址、模型名称或密钥尚未填完整，补全后即可使用云端模式。"
           : "设置已保存，将用于后续生成与分析。尚未验证模型连通性。";
+        const switched = settings.task_switch;
+        if (switched?.resumed || switched?.preparing) feedback.textContent = `设置已保存，${switched.resumed} 个制卡任务已用新配置继续，${switched.preparing} 份讲义继续准备。已生成卡片保留，请到卡牌结果查看进度。`;
+        if (switched?.unchanged) feedback.textContent = "设置已保存，配置没有变化，当前制卡继续运行，无需重新请求已在处理的内容。";
+        if (switched?.not_resumed) {
+          feedback.className = "notice warning model-settings-feedback";
+          feedback.textContent = `设置已保存，但有 ${switched.not_resumed} 个任务未能继续。已生成卡片保留，请到卡牌结果检查来源与任务状态后重试。`;
+        }
         feedback.hidden = false;
       } catch (failure) {
         error.textContent = (failure.message || "设置未能保存，请稍后重试。")

@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const http = require("node:http");
 const net = require("node:net");
+const { spawnSync } = require("node:child_process");
 const { _electron } = require("playwright");
 const { probeBackend } = require("./backend-health.cjs");
 const { version } = require("./package.json");
@@ -14,6 +15,8 @@ const executable = process.env.ANKISENSE_TEST_EXECUTABLE
   ? path.resolve(process.env.ANKISENSE_TEST_EXECUTABLE) : path.join(__dirname, "dist", "win-unpacked", "AnkiSense.exe");
 fs.mkdirSync(directory, { recursive: true });
 const results = [], errors = [], screenshotWarnings = [], calls = [], externalRequests = [];
+const generationCalls = [];
+let heldModel = null;
 const fixtureKey = "native-fictional-key";
 let electronApp, window, provider, port, base, env;
 let replyMode = "success";
@@ -81,6 +84,17 @@ async function save() {
       const payload = JSON.parse(body);
       assert.equal(request.url, "/v1/chat/completions");
       assert.equal(request.headers.authorization, "Bearer " + fixtureKey);
+      const userContent = payload.messages[1].content;
+      const input = JSON.parse(Array.isArray(userContent) ? userContent.find(item => item.type === "text").text : userContent);
+      if (input.source_blocks) {
+        generationCalls.push({ model: payload.model, pages: input.page_numbers });
+        while (payload.model === heldModel && !response.destroyed) await new Promise(resolve => setTimeout(resolve, 50));
+        if (!response.destroyed) {
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: '{"points":[]}' } }] }));
+        }
+        return;
+      }
       assert.equal(payload.max_tokens, 64);
       assert.equal(payload.response_format.type, "json_object");
       assert.deepEqual(JSON.parse(payload.messages[1].content), { test: "AnkiSense connection check" });
@@ -190,6 +204,35 @@ async function save() {
     assert.equal(settings.api_key_configured, true); assert.ok(!JSON.stringify(settings).includes(fixtureKey));
     assert.deepEqual(errors, []); assert.deepEqual(externalRequests, []);
   });
+  await check("Saving a new model cancels the current generation and resumes its original job", async () => {
+    assert.equal(await field("resume_active_jobs").isChecked(), true);
+    await window.locator(".model-settings-advanced summary").click();
+    await field("timeout_seconds").fill("30"); await save();
+    const pdf = path.join(directory, "switch-fixture.pdf");
+    const script = "from pypdf import PdfWriter;from pypdf.generic import DictionaryObject,NameObject,DecodedStreamObject;import sys;w=PdfWriter();p=w.add_blank_page(width=720,height=540);f=DictionaryObject({NameObject('/Type'):NameObject('/Font'),NameObject('/Subtype'):NameObject('/Type1'),NameObject('/BaseFont'):NameObject('/Helvetica')});p[NameObject('/Resources')]=DictionaryObject({NameObject('/Font'):DictionaryObject({NameObject('/F1'):w._add_object(f)})});s=DecodedStreamObject();s.set_data(b'BT /F1 18 Tf 40 460 Td (Stacks use last in first out.) Tj ET');p[NameObject('/Contents')]=w._add_object(s);w.write(sys.argv[1])";
+    const prepared = spawnSync(path.join(project, ".venv", "Scripts", "python.exe"), ["-c", script, pdf], { windowsHide: true });
+    assert.equal(prepared.status, 0, prepared.stderr?.toString());
+    heldModel = "changed-native-fixture";
+    const upload = await window.request.post(`${base}/api/material-imports`, { multipart: { file: { name: "switch-fixture.pdf", mimeType: "application/pdf", buffer: fs.readFileSync(pdf) } } });
+    assert.equal(upload.status(), 200);
+    const record = await upload.json();
+    for (let i = 0; i < 100 && !generationCalls.length; i++) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(generationCalls.length, 1);
+    const original = await (await window.request.get(`${base}/api/material-imports/${record.id}`)).json();
+    await field("model").fill("switched-generation-fixture"); await save();
+    await window.getByText(/1 个制卡任务已用新配置继续/).waitFor();
+    let finished;
+    for (let i = 0; i < 100; i++) {
+      finished = await (await window.request.get(`${base}/api/material-imports/${record.id}`)).json();
+      if (!["pending", "running"].includes(finished.status)) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    heldModel = null;
+    assert.equal(finished.job.id, original.job.id);
+    assert.ok(!["pending", "running"].includes(finished.status));
+    assert.deepEqual(generationCalls.map(item => item.model), ["changed-native-fixture", "switched-generation-fixture"]);
+    await capture("model-switch-resumed");
+  });
   await check("Closing the packaged application stops its own backend", stop);
 })().catch(async error => {
   errors.push(error.stack || String(error)); console.error(error);
@@ -202,6 +245,6 @@ async function save() {
   if (electronApp) { try { await stop(); } catch (error) { errors.push(error.message); process.exitCode = 1; } }
   if (provider) await closeServer(provider);
   fs.writeFileSync(path.join(directory, "report.json"), JSON.stringify({ executable, version, passed: errors.length === 0,
-    real_model_calls: 0, local_fixture_calls: calls, results, errors, screenshotWarnings, externalRequests }, null, 2));
+    real_model_calls: 0, local_fixture_calls: calls, generation_fixture_calls: generationCalls, results, errors, screenshotWarnings, externalRequests }, null, 2));
   console.log(`REPORT ${directory}`);
 });

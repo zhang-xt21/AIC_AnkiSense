@@ -104,10 +104,12 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
     app.state.card_auto_review = card_auto_review
     app.state.source_proofread = source_proofread
     app.state.active_model_requests = 0
+    app.state.model_settings_switching = False
     calibration = SourceCalibrationService(store, storage, lambda: app.state.ai, lambda: app.state.settings)
     app.state.source_calibration = calibration
     auto_cards = AutoCardService(store, storage, lambda: app.state.ai, lambda: app.state.settings,
                                  recommendations, image_checks, calibration)
+    auto_cards.settings_switching = lambda: app.state.model_settings_switching
     app.state.auto_cards = auto_cards
     automatic_imports = AutomaticImportService(store, storage, auto_cards)
     app.state.automatic_imports = automatic_imports
@@ -134,6 +136,8 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
             if origin and (urlparse(origin).netloc != request.headers.get("host") or urlparse(origin).scheme not in {"http", "https"}):
                 return JSONResponse({"detail": "仅接受来自本地应用页面的操作。"}, status_code=403)
         uses_model = model_request(request)
+        if app.state.model_settings_switching and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            return JSONResponse({"detail": "正在切换模型并暂停制卡，请稍后再操作。"}, status_code=409)
         if uses_model:
             app.state.active_model_requests += 1
         try:
@@ -194,7 +198,7 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
     def health():
         return {"application": "AnkiSense", "api_version": 1,
                 "status": "ok", "mode": app.state.settings.mode,
-                "app_version": APP_VERSION, "capabilities": {"anki_setup": True, "ai_connection_test": True}}
+                "app_version": APP_VERSION, "capabilities": {"anki_setup": True, "ai_connection_test": True, "ai_task_switch": True}}
 
     @app.get("/api/state")
     def state():

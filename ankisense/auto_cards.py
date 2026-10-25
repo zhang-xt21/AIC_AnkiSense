@@ -235,6 +235,8 @@ class AutoCardService:
         return document, eligible, calibration, issues, digest([manifest, [b.model_dump() for b in blocks]])
 
     def _configuration(self):
+        if self.settings_switching():
+            raise HTTPException(409, "模型设置正在切换，请稍后再开始制卡。")
         settings = self.settings()
         if settings.mode != "cloud" or not all((settings.api_key, settings.model, settings.base_url)):
             raise HTTPException(422, "自动制卡需要先在模型设置中配置云端模型。")
@@ -292,7 +294,13 @@ class AutoCardService:
                 self.tasks.pop(job_id, None)
         task.add_done_callback(done)
 
+    def settings_switching(self):
+        return False
+
     async def retry(self, job_id: str):
+        return await self._retry(job_id)
+
+    async def _retry(self, job_id, *, allow_model_change=False):
         async with self.lock:
             job = self._job(job_id)
             if job["status"] in ACTIVE:
@@ -300,7 +308,7 @@ class AutoCardService:
             if not self._public(job)["retryable"]:
                 raise HTTPException(409, "此任务无需重试；来源变化后请创建新任务。")
             config = self._configuration()
-            if config != job["config"] and not job.get("options", {}).get("autonomous"):
+            if config != job["config"] and not job.get("options", {}).get("autonomous") and not allow_model_change:
                 raise HTTPException(409, "模型或提示版本已变化，请创建新任务。")
             if job.get("options", {}).get("autonomous"):
                 signature = self._capture(job["document_id"], True)[-1]

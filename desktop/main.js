@@ -45,7 +45,7 @@ async function waitForBackend() {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (backendFailure) throw new Error(backendFailure);
-    const result = await probeBackend({ host: HOST, port: PORT, requireAnkiSetup: true, requireConnectionTest: true });
+    const result = await probeBackend({ host: HOST, port: PORT, requireAnkiSetup: true, requireConnectionTest: true, requireTaskSwitch: true });
     if (result.ready) return;
     if (result.responding) throw new Error(result.reason);
     await new Promise(resolve => setTimeout(resolve, 250));
@@ -97,7 +97,7 @@ else {
     ankiIntegration = createAnkiIntegration({ userData: app.getPath("userData"), projectRoot: PROJECT_ROOT,
       backendUrl: BASE_URL, dialog, shell, getWindow: () => mainWindow });
     Menu.setApplicationMenu(null);
-    const result = await probeBackend({ host: HOST, port: PORT, requireAnkiSetup: true, requireConnectionTest: true });
+    const result = await probeBackend({ host: HOST, port: PORT, requireAnkiSetup: true, requireConnectionTest: true, requireTaskSwitch: true });
     if (result.responding && !result.ready) throw new Error(`${result.reason}。请释放端口 ${PORT} 后重试。`);
     if (process.argv.includes("--spawn-backend") && result.responding) throw new Error(`端口 ${PORT} 已有 AnkiSense 运行。请关闭旧服务或使用默认启动方式。`);
     if (!result.ready) {
