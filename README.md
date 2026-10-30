@@ -6,18 +6,17 @@ AnkiSense 是面向课程学习的独立桌面软件。用户导入讲义后，�
 
 [演示步骤](docs/user/演示指南.md) · [测试结论](docs/evaluation/测试结论.md) · [源码导航](docs/development/代码目录指南.md) · [文档中心](docs/README.md)
 
-> 交付候选：当前构建版本为 **0.1.19**，源码版本以 Git 提交为准，最终提交标签及安装包下载待发布。
+> **[v0.1.19 比赛版已发布](https://github.com/zhang-xt21/AIC_AnkiSense/releases/tag/v0.1.19)**。比赛版源码固定在提交 `e496da3`；本页补充展示截图，不改变已发布的程序与版本标签。
 
 ## 产品展示
 
-<!-- 在下面空白单元格插入截图；请裁掉密钥、个人路径及学习数据。 -->
-| 导入讲义与卡片结果 | 图文卡片与公式预览 |
+| 导入讲义与卡片结果 | 公式显示与主动回忆 |
 | --- | --- |
-| <!-- 截图预留：导入与结果 --> | <!-- 截图预留：图文卡片 --> |
+| ![导入讲义后的制卡进度、可学习卡片与筛选](docs/assets/screenshots/card-results.png) | ![含逻辑公式的主动回忆题目与作答区域](docs/assets/screenshots/formula-practice.png) |
 
-| 自由作答与依据反馈 | Anki 内作答与同步 |
+| 自由作答与依据反馈 | Anki 内作答 |
 | --- | --- |
-| <!-- 截图预留：作答反馈 --> | <!-- 截图预留：Anki --> |
+| ![自由回答后的分析结论、判断说明与原文核对入口](docs/assets/screenshots/answer-feedback.png) | ![Anki 复习卡片与插件内部作答窗口](docs/assets/screenshots/anki-answer.png) |
 
 ## 核心流程
 
@@ -61,7 +60,7 @@ AnkiSense 是面向课程学习的独立桌面软件。用户导入讲义后，�
 
 ### Windows 安装版
 
-安装包将通过 [GitHub Releases](https://github.com/zhang-xt21/AIC_AnkiSense/releases) 发布。**0.1.19 当前为本地构建，尚未在本轮发布**；页面没有对应附件时，请使用源码启动。
+从 [v0.1.19 比赛版发布页](https://github.com/zhang-xt21/AIC_AnkiSense/releases/tag/v0.1.19) 下载 `AnkiSense.Setup.0.1.19.exe`。发布页同时提供对应源码、许可声明和 SHA-256 校验值。
 
 安装版包含 AnkiSense 后端、网页及 Anki 插件文件，不包含 Anki 主程序。独立制卡和学习不需要安装 Anki；模型 API 由使用者自行配置。PPT/PPTX 转换需要本机 PowerPoint 或 LibreOffice，PDF 无此要求。
 
