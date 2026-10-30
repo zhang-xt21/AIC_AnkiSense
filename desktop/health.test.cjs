@@ -35,12 +35,16 @@ test("the setup desktop rejects a legacy backend instead of silently reusing it"
     http.get = (_options, callback) => {
       const request = new EventEmitter(), response = new EventEmitter();
       response.statusCode = 200; response.setEncoding = () => {};
-      queueMicrotask(() => { callback(response); response.emit("data", JSON.stringify({ application: "AnkiSense", api_version: 1, status: "ok", ...(supportsSetup ? { capabilities: { anki_setup: true } } : {}) })); response.emit("end"); });
+      queueMicrotask(() => { callback(response); response.emit("data", JSON.stringify({ application: "AnkiSense", api_version: 1, app_version: "0.1.5", status: "ok", ...(supportsSetup ? { capabilities: { anki_setup: true } } : {}) })); response.emit("end"); });
       return request;
     };
     assert.equal((await probeBackend({ requireAnkiSetup: true })).ready, false);
     supportsSetup = true;
     assert.equal((await probeBackend({ requireAnkiSetup: true })).ready, true);
+    assert.equal((await probeBackend({ requireAppVersion: "0.1.5" })).ready, true);
+    const mismatch = await probeBackend({ requireAppVersion: "0.1.6" });
+    assert.equal(mismatch.ready, false);
+    assert.match(mismatch.reason, /版本与当前客户端不一致/);
   } finally { http.get = original; }
 });
 
@@ -54,7 +58,7 @@ test("connection verification requires an explicit capability even on a backend 
         queueMicrotask(() => {
           callback(response);
           response.emit("data", JSON.stringify({ application: "AnkiSense", api_version: 1, status: "ok",
-            capabilities: { anki_setup: true, ai_connection_test: capability } }));
+            capabilities: { anki_setup: true, ai_connection_test: capability, large_exports: capability } }));
           response.emit("end");
         });
         return request;
@@ -64,6 +68,7 @@ test("connection verification requires an explicit capability even on a backend 
       if (!result.ready) assert.match(result.reason, /退出旧版/);
       assert.equal((await probeBackend({ requireAnkiSetup: true })).ready, true);
       assert.equal((await probeBackend({ requireTaskSwitch: true })).ready, false);
+      assert.equal((await probeBackend({ requireLargeExports: true })).ready, capability === true);
     }
   } finally { http.get = original; }
 });

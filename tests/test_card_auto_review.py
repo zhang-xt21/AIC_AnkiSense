@@ -15,6 +15,7 @@ import pytest
 from PIL import Image
 
 from ankisense.llm import AIError, Settings
+from ankisense.schemas import Diagnosis
 from ankisense.sources import save_page_revision
 from test_figure_recommendations import context, save
 from test_image_auto_review import saved as saved_image, post as check_image
@@ -32,6 +33,7 @@ def good_review(card):
     evidence = card["evidence"][0]
     citation = {"block_id": evidence["block_id"], "exact_quote": evidence["quote"]}
     return {
+        "learning_scope": {"verdict": "single", "targets": [{"question_span": card["question"], "goal": "一个完整的复习目标"}], "reason": "题干围绕同一个核心知识目标。"},
         "minimal_answer": card["answer"], "minimal_answer_citations": [citation],
         "decision": "pass",
         "question_answerable": True,
@@ -48,7 +50,7 @@ def good_review(card):
     }
 
 
-@pytest.mark.parametrize("scope", ["background", "uncertain"])
+@pytest.mark.parametrize("scope", ["given", "background", "uncertain"])
 def test_supported_fact_cannot_pass_when_it_is_not_a_confirmed_question_requirement(ready, monkeypatch, scope):
     client, card, service, calls = ready
     review = good_review(card)
@@ -127,7 +129,62 @@ def ready(context, monkeypatch):
         return copy.deepcopy(good_review(card))
 
     monkeypatch.setattr(client.app.state.ai, "review_card", review)
+    monkeypatch.setattr(client.app.state.ai, "diagnose_answer", correct_reference_diagnosis)
+    monkeypatch.setattr(client.app.state.ai, "minimal_answer_for_question", minimal_answer_fixture)
     return client, card, service, calls
+
+
+async def correct_reference_diagnosis(card, blocks, answer):
+    return Diagnosis(verdict="correct", addressed_point_ids=[p.point_id for p in card.rubric],
+                     missing_point_ids=[], contradicted_point_ids=[], answer_spans=[answer],
+                     source_block_ids=[card.evidence[0].block_id], reason="离线自测固定响应。")
+
+
+async def minimal_answer_fixture(card, blocks):
+    return card.answer
+
+
+def test_independent_minimal_answer_failure_blocks_saved_card_release(ready, monkeypatch):
+    client, card, service, _ = ready
+    async def minimal(draft, blocks):
+        return "最短回答。"
+    async def diagnose(draft, blocks, answer):
+        if answer != "最短回答。":
+            return await correct_reference_diagnosis(draft, blocks, answer)
+        point = draft.rubric[0].point_id
+        return Diagnosis(verdict="incomplete", addressed_point_ids=[point], missing_point_ids=[point],
+                         contradicted_point_ids=[], answer_spans=[answer], source_block_ids=[draft.evidence[0].block_id],
+                         reason="评分点多要求额外表示。")
+    monkeypatch.setattr(client.app.state.ai, "minimal_answer_for_question", minimal)
+    monkeypatch.setattr(client.app.state.ai, "diagnose_answer", diagnose)
+    response = post(client, card).json()
+    assert response["status"] == "attention"
+    stored = service.store.get("card_auto_reviews", response["review_id"])
+    assert stored["reference_answer_check"]["verdict"] == "correct"
+    assert stored["minimal_answer_check"]["diagnosis"]["verdict"] == "incomplete"
+    assert service.store.get("cards", card["id"])["status"] == "draft"
+
+
+@pytest.fixture(autouse=True)
+def reference_answer_fixture(context, monkeypatch):
+    client, *_ = context
+    monkeypatch.setattr(client.app.state.ai, "diagnose_answer", correct_reference_diagnosis)
+    monkeypatch.setattr(client.app.state.ai, "minimal_answer_for_question", minimal_answer_fixture)
+
+
+def test_reference_answer_failure_blocks_saved_card_machine_approval(ready, monkeypatch):
+    client, card, service, _ = ready
+    async def incomplete(draft, blocks, answer):
+        point = draft.rubric[0].point_id
+        return Diagnosis(verdict="incomplete", addressed_point_ids=[point], missing_point_ids=[point],
+                         contradicted_point_ids=[], answer_spans=[answer],
+                         source_block_ids=[draft.evidence[0].block_id], reason="参考答案未满足额外评分条件。")
+    monkeypatch.setattr(client.app.state.ai, "diagnose_answer", incomplete)
+    response = post(client, card).json()
+    assert response["status"] == "attention"
+    assert service.store.get("cards", card["id"])["status"] == "draft"
+    stored = service.store.get("card_auto_reviews", response["review_id"])
+    assert stored["reference_answer_check"]["verdict"] == "incomplete"
 
 
 def test_reviewed_pdf_card_pass_atomically_approves_without_content_version_change(ready):
@@ -337,9 +394,14 @@ def test_manual_uploaded_picture_requires_human_review(ready):
     assert service.store.get("cards", card["id"])["status"] == "draft"
 
 
-def test_current_auto_passed_recommended_picture_allows_whole_card_review(saved_image, monkeypatch):
+@pytest.mark.parametrize("classification,leakage", [("diagram", "no"), ("text", "yes"), ("table", "yes")])
+def test_current_auto_passed_recommended_picture_allows_whole_card_review(saved_image, monkeypatch, classification, leakage):
     client, card, media, _job, _image_calls, image_service, storage = saved_image
     bind_imported_pdf(client, card, storage)
+    from ankisense import image_auto_review
+    from test_image_auto_review import GOOD
+    monkeypatch.setattr(image_auto_review, "run_enrichment", lambda *args: {"result": {
+        **GOOD, "classification": classification, "answer_leakage": leakage}})
     image_result = check_image(client, card, media)
     assert image_result.status_code == 200 and image_result.json()["status"] == "auto_pass"
     service = client.app.state.card_auto_review
@@ -354,7 +416,14 @@ def test_current_auto_passed_recommended_picture_allows_whole_card_review(saved_
     result = post(client, card)
     assert result.status_code == 200, result.text
     assert result.json()["status"] == "auto_pass" and len(calls) == 1
-    assert service.store.get("cards", card["id"])["status"] == "approved"
+    approved = service.store.get("cards", card["id"])
+    assert approved["status"] == "approved"
+    from ankisense.approval import valid_machine_approval
+    assert valid_machine_approval(service.store, approved)
+    receipt = service.store.get("image_auto_reviews", image_result.json()["review_id"])
+    receipt["policy_version"] = "saved-picture-auto-review-v4-direct"
+    service.store.put("image_auto_reviews", receipt)
+    assert not valid_machine_approval(service.store, approved)
 
 
 def test_model_failure_needs_review_and_can_retry(ready, monkeypatch):

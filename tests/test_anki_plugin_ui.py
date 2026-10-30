@@ -19,8 +19,8 @@ def test_real_anki_plugin_ui(tmp_path):
     shell = shutil.which("pwsh") or shutil.which("powershell")
     assert shell, "A PowerShell host is needed for the official embedded runtime"
     result = subprocess.run(
-        [shell, "-NoProfile", "-File", str(ROOT / "tools" / "run_anki_python.ps1"),
-         "-Script", str(ROOT / "tools" / "test_anki_plugin_ui.py"),
+        [shell, "-NoProfile", "-File", str(ROOT / "tools" / "anki" / "run_anki_python.ps1"),
+         "-Script", str(ROOT / "tools" / "anki" / "test_anki_plugin_ui.py"),
          "-AnkiRoot", str(runtime),
          "-DataDirectory", str(tmp_path / "official-anki-ui")],
         cwd=ROOT,

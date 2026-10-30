@@ -5,6 +5,7 @@ const path = require("node:path");
 const { spawn, execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const execute = promisify(execFile);
+const { showAnkiWindow } = require("./anki-window.cjs");
 
 async function runningAnki() {
   if (process.platform !== "win32") return false;
@@ -12,7 +13,8 @@ async function runningAnki() {
   return stdout.trim() === "running";
 }
 
-function createAnkiIntegration({ userData, projectRoot, backendUrl, dialog, shell, getWindow, request = fetch }) {
+function createAnkiIntegration({ userData, projectRoot, backendUrl, dialog, shell, getWindow, request = fetch,
+  isRunning = runningAnki, start = spawn, showWindow = showAnkiWindow }) {
   const settingsPath = path.join(userData, "anki-setup.json");
   let selected = {};
   try { selected = JSON.parse(fs.readFileSync(settingsPath, "utf8")); } catch { /* First setup. */ }
@@ -39,7 +41,7 @@ function createAnkiIntegration({ userData, projectRoot, backendUrl, dialog, shel
         if (value.package === "ankisense_sync") addon = { installed: true, version: value.human_version };
       } catch { /* No add-on yet. */ }
     }
-    const result = { executable, dataDirectory, dataReady: Boolean(dataDirectory && fs.existsSync(path.join(dataDirectory, "prefs21.db"))), addon, running: await runningAnki() };
+    const result = { executable, dataDirectory, dataReady: Boolean(dataDirectory && fs.existsSync(path.join(dataDirectory, "prefs21.db"))), addon, running: await isRunning() };
     return result;
   }
   async function chooseProgram() {
@@ -72,12 +74,19 @@ function createAnkiIntegration({ userData, projectRoot, backendUrl, dialog, shel
   async function launch() {
     const current = await detect();
     if (!current.executable) throw new Error("尚未找到 Anki，请先安装或选择程序。");
-    if (current.running) return { running: true, message: "Anki 已运行，请在其中打开工具 → AnkiSense · 同步卡片。" };
+    if (current.running) {
+      let result;
+      try { result = await showWindow(current.executable); }
+      catch { throw new Error("Anki 已在运行，但窗口未能显示。请稍后再点「打开 Anki」，无需重新安装插件。"); }
+      if (!result.visible) throw new Error("Anki 已在运行，但暂未找到可显示的主窗口。请稍后再点「打开 Anki」。");
+      return { running: true, message: result.activated ? "已显示 Anki 窗口，可在「工具 → AnkiSense · 同步卡片」中继续。"
+        : "Anki 窗口已显示；若仍在后台，请从任务栏切换到 Anki。" };
+    }
     const args = current.dataReady ? ["-b", current.dataDirectory] : [];
-    const child = spawn(current.executable, args, { detached: true, windowsHide: true, stdio: "ignore" });
+    const child = start(current.executable, args, { detached: true, windowsHide: false, stdio: "ignore" });
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", () => reject(new Error("Anki 未能启动，请检查程序位置。"))); });
     child.unref();
-    return { running: true, message: "已启动 Anki，选择资料后，插件会自动检查本机连接。" };
+    return { running: true, message: "正在打开 Anki；若启动较慢，请稍候。选择资料后，插件会自动检查本机连接。" };
   }
   async function revealConnection() {
     const response = await request(backendUrl + "/api/anki/setup"); const body = await response.json();

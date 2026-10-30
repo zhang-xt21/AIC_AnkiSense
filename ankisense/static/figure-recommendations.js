@@ -73,13 +73,13 @@
   function cropDialog(candidate, onAccept, opener, state) {
     if (!localImage(candidate.page_url)) return;
     const dialog = node("dialog", "card-image-dialog figure-crop-dialog");
-    const title = node("h2", "", `第 ${candidate.page} 页 · 预览与裁剪`);
+    const title = node("h2", "", `第 ${candidate.page} 页 · 裁剪配图`);
     title.id = "figure-crop-title";
     dialog.setAttribute("aria-labelledby", title.id);
     const close = btn("取消", () => dialog.close());
     const header = node("div", "card-image-dialog-header");
     header.append(title, close);
-    const help = node("p", "helper figure-crop-help", "在原页上拖动框选范围，或用下方百分比微调。请保留相关箭头、图例和文字。");
+    const help = node("p", "helper figure-crop-help", "拖动框选需要的范围，按 Esc 退出。");
     const viewport = node("div", "figure-crop-viewport");
     const stage = node("div", "figure-crop-stage");
     const image = node("img");
@@ -104,7 +104,7 @@
     side.addEventListener("change", () => check?.refresh());
     const error = node("p", "inline-error");
     error.setAttribute("role", "alert");
-    const accept = btn("采纳此范围 →", () => { if (loaded && validBox(box)) { dialog.close(); onAccept([...box], side.value); } }, true, "btn small");
+    const accept = btn("加入卡片", () => { if (loaded && validBox(box)) { dialog.close(); onAccept([...box], side.value); } }, true, "btn small");
     const inputs = ["左边界 %", "上边界 %", "右边界 %", "下边界 %"].map((label, index) => {
       const wrapper = node("label", "field");
       const input = node("input");
@@ -148,12 +148,14 @@
     image.addEventListener("load", () => { loaded = true; update(); });
     image.addEventListener("error", () => { loaded = false; accept.disabled = true; error.textContent = "原图暂时无法读取，请关闭后重试。"; });
     const actions = node("div", "two-buttons");
-    actions.append(btn("恢复推荐范围", () => { box = [...candidate.bbox]; update(); }), btn("选择整页", () => { box = [0, 0, 1, 1]; update(); }), accept);
+    actions.append(btn("选择整页", () => { box = [0, 0, 1, 1]; update(); }), accept);
     const sideField = node("label", "field");
     sideField.append(node("span", "", "图片显示位置"), side);
-    controls.append(fields, error, sideField);
+    const precision = node("details", "figure-crop-precision");
+    precision.append(node("summary", "", "精确调整范围"), fields);
+    controls.append(precision, error, sideField);
     if (state) { check = checkPanel(state, candidate, () => box, () => side.value, "crop"); controls.append(check.element); }
-    controls.append(actions, node("p", "helper", "采纳后保存并审核，才会进入练习与导出。改变裁剪范围或显示位置后，需要重新检查配图。"));
+    controls.append(actions);
     dialog.append(header, help, viewport, controls);
     dialog.addEventListener("close", () => { dialog.remove(); if (opener?.isConnected) opener.focus(); });
     document.body.append(dialog);
@@ -179,7 +181,7 @@
       const unchanged = sameCheckSource(card, draft) && !card.source_outdated;
       const entry = unchanged ? state.checks.get(key) : null;
       const available = Boolean(vision?.available);
-      const check = btn(entry?.loading ? "正在理解图片…" : entry?.result ? "重新查看检查结果" : "分类并检查配图", async () => {
+      const check = btn(entry?.loading ? "正在检查…" : entry?.result ? "重新检查配图" : "检查配图", async () => {
         if (!sameCheckSource(state.options.card, state.options.draft) || !validBox(getBox())) return;
         const submitted = { job_id: state.job.id, candidate_id: candidate.id, card_version: card.version, bbox: [...getBox()], side: getSide() };
         const sentKey = checkKey(submitted.job_id, candidate.id, submitted.bbox, submitted.side);
@@ -190,15 +192,15 @@
         } catch (error) { pending.error = error.message; }
         finally { pending.loading = false; notifyCheckPanels(state); }
       }, !available || !unchanged || !validBox(box) || entry?.loading, "btn secondary small");
-      element.replaceChildren(node("p", "helper", `本次检查：${location === "crop" ? "当前框选范围" : "上方推荐范围"} · ${side === "question" ? "题目侧（作答前可见）" : "答案侧（作答后查看）"}`), check);
+      element.replaceChildren(check);
       if (location === "candidate" && candidateCheckScope(candidate, state.job?.id, draft, state.options.media).otherCrop) {
         element.append(node("p", "notice warning", "已采纳图片的裁剪范围与上方候选不同。这里的结论只适用于上方推荐范围；请在裁剪窗口检查实际使用的范围。"));
       }
-      element.append(node("p", "helper", "点击后，将当前裁图、对应原页及已保存的题目、答案与评分要点发送到配置的云端模型。检查不会批准卡片。"));
+      if (available) element.append(node("p", "helper", "检查会将裁图、原页与卡片文字发送到当前模型，可能产生费用。"));
       if (!available) element.append(node("p", "helper", vision?.message || "请配置支持图片输入的云端模型后使用。"));
       if (!unchanged) element.append(node("p", "notice warning", "文字或评分要点有未保存的修改，请先保存，再检查当前图文组合。"));
       if (entry?.loading) {
-        const loading = node("p", "helper", "正在通过 Docling 生成图片描述并检查与卡片的关系，可以继续查看其他卡片。");
+        const loading = node("p", "helper", "正在核对图片与卡片内容…");
         loading.setAttribute("role", "status"); element.append(loading);
       }
       if (entry?.error) { const error = node("p", "inline-error", entry.error); error.setAttribute("role", "alert"); element.append(error); }
@@ -207,17 +209,21 @@
         const names = { pass: "机器检查：未发现明显问题", attention: "机器检查：建议调整", uncertain: "机器检查：无法确定" };
         const report = node("div", `figure-vision-result ${result.verdict === "pass" ? "checked" : "attention"}`);
         report.append(node("strong", "", names[result.verdict] || names.uncertain));
-        if (result.description) report.append(node("p", "", result.description));
+        for (const reason of (result.reasons || []).slice(0, 2)) report.append(node("p", "figure-vision-reason", reason));
+        const details = node("details", "figure-check-details");
+        details.append(node("summary", "", "检查详情"));
+        if (result.description) details.append(node("p", "", result.description));
         const classes = { diagram: "示意图", table: "表格", chart: "统计图", formula: "公式", photo: "照片", decoration: "装饰图", text: "文字区域", unknown: "无法确定" };
-        if (result.classification?.label) report.append(node("p", "helper", `图像类别：${classes[result.classification.label] || "其他"} · 由视觉模型生成`));
+        if (result.classification?.label) details.append(node("p", "helper", `图像类别：${classes[result.classification.label] || "其他"}`));
         const labels = { supported: "支持题目", unrelated: "不相关", uncertain: "无法确定", complete: "完整", incomplete: "可能缺少内容", clear: "可辨认", unclear: "不清晰", yes: "可能泄露", no: "未发现" };
         const rows = [["与题目关系", result.relation], ["裁剪完整性", result.completeness], ["文字清晰度", result.legibility]];
-        rows.push([side === "question" ? "题面泄露答案" : "若放在题目侧", result.answer_leakage]);
+        if (side === "question") rows.push(["题面泄露答案", result.answer_leakage]);
         const list = node("dl", "figure-vision-facts");
         for (const [label, value] of rows) list.append(node("dt", "", label), node("dd", "", labels[value] || "无法确定"));
-        report.append(list);
-        for (const reason of result.reasons || []) report.append(node("p", "figure-vision-reason", reason));
-        report.append(node("p", "helper", `${result.cached ? "复用相同图文的检查结果。" : ""}机器检查供核对参考，不代表已人工审核。`));
+        details.append(list);
+        if (side === "answer") details.append(node("p", "helper", "答案侧允许包含答案文字；移到题目侧后需重新检查。"));
+        for (const reason of (result.reasons || []).slice(2)) details.append(node("p", "figure-vision-reason", reason));
+        report.append(details);
         element.append(report);
       }
     }
@@ -290,77 +296,49 @@
     const running = state.starting || active(state.job);
     const disabled = busy || !unchanged || draft.images.length >= 4;
     const header = node("div", "figure-recommend-header");
-    header.append(node("div", "", "从引用中，找到对应的图"), btn(running ? "正在查找…" : state.job ? "重新获取推荐" : "推荐讲义配图", () => start(state), disabled || running, "btn small"));
-    host.replaceChildren(header, node("p", "helper", "在本机查找引用页中的图和表，保留出处。候选图需要你确认是否完整、是否适合这道题。"));
-    if (!unchanged) host.append(node("p", "notice warning", "题目、知识概念或引用已改变。请先保存并核对最新原文，再获取配图推荐。"));
-    if (draft.images.length >= 4) host.append(node("p", "helper", "已有 4 张配图；移除一张后可继续采纳。"));
+    header.append(node("strong", "", "引用页原图"), btn(running ? "正在准备…" : state.job ? "刷新原图" : "选择原图",
+      () => start(state), disabled || running));
+    host.replaceChildren(header);
+    if (!unchanged) host.append(node("p", "notice warning", "请先保存题目和引用，再选择原图。"));
+    if (draft.images.length >= 4) host.append(node("p", "helper", "已有 4 张配图，移除一张后可继续添加。"));
     if (running) {
-      const progress = node("p", "figure-job-status", state.job?.message || "正在本机解析引用页，首次处理可能需要较长时间。你可以继续编辑其他内容。");
-      progress.setAttribute("role", "status");
-      host.append(progress);
-      if (state.job?.id) host.append(btn("取消本次推荐", async () => {
+      const progress = node("p", "helper", state.job?.message || "正在准备引用页原图…");
+      progress.setAttribute("role", "status"); host.append(progress);
+      if (state.job?.id) host.append(btn("取消", async () => {
         try {
           state.job = await api(`/api/image-recommendations/${encodeURIComponent(state.job.id)}/cancel`, json({}));
-          clearTimeout(state.timer);
-          state.error = "";
+          clearTimeout(state.timer); state.error = "";
         } catch (error) { state.error = error.message; }
         state.draw();
       }));
     }
-    if (state.error) {
-      host.append(node("p", "inline-error", state.error));
-      if (state.job?.id) host.append(btn("刷新状态", () => poll(state), state.polling));
+    if (state.error || state.job?.status === "failed") {
+      const error = node("p", "inline-error", state.error || state.job.message || "原图准备失败，请重试。");
+      error.setAttribute("role", "alert"); host.append(error);
     }
-    if (state.job?.warning || state.job?.status === "failed") host.append(node("p", "notice warning", state.job.warning || state.job.message || "图块提取暂未完成，可以重试或手动上传截图。"));
     const candidates = Array.isArray(state.job?.candidates) ? state.job.candidates : [];
-    const figures = candidates.filter(item => item.kind !== "page");
-    const pages = candidates.filter(item => item.kind === "page");
-    if (state.job?.status === "completed" && !figures.length && !state.job.parser_failed) host.append(node("p", "figure-empty", "没有找到合适的独立图块。可从下方整页原图中手动框选，或继续使用文字卡片。"));
-    async function adopt(candidate, bbox, side = "answer") {
+    async function adopt(candidate, bbox, side) {
       if (!sameSource(card, draft) || draft.images.length >= 4) return;
       await run(async () => {
-        const record = await api(`/api/cards/${encodeURIComponent(card.id)}/image-recommendations/adopt`, json({ job_id: state.job.id, candidate_id: candidate.id, card_version: card.version, ...(bbox ? { bbox } : {}) }));
+        const record = await api(`/api/cards/${encodeURIComponent(card.id)}/image-recommendations/adopt`,
+          json({ job_id: state.job.id, candidate_id: candidate.id, card_version: card.version, bbox }));
         onAdopt(record, side);
-        state.adopted.add(candidate.id);
       });
     }
-    function candidateView(candidate) {
-      const item = node("article", "figure-candidate");
-      const label = `第 ${candidate.page} 页 · ${candidate.kind === "page" ? "整页原图备选" : candidate.kind === "table" ? "表格候选" : "图块候选"}`;
-      const img = node("img");
-      if (localImage(candidate.preview_url)) img.src = candidate.preview_url;
-      img.alt = label;
-      img.loading = "lazy";
-      const thumb = node("div", "figure-candidate-preview");
-      thumb.append(img);
-      img.addEventListener("error", () => thumb.replaceChildren(node("p", "helper", "缩略图无法读取，可打开原页检查。")), { once: true });
-      const info = node("div", "figure-candidate-info");
-      info.append(node("strong", "", label), node("p", "helper", candidate.reason || "同页候选，请对照讲义核对。"));
-      if (candidate.caption) info.append(node("p", "figure-caption", candidate.caption));
-      for (const note of candidate.context_notes || []) info.append(node("p", "helper", note));
-      const warnings = { context_unresolved: "邻近说明未能完整组合，请检查原页。", mixed_context: "必要的公式与页脚混在同一文字块中，扩图可能带入额外内容。", text_at_crop_edge: "裁剪边缘可能碰到文字，请检查范围。", figure_at_crop_edge: "裁剪边缘可能带入其他图形的局部，请检查范围。", layout_context_unavailable: "当前解析缺少文字位置信息，请核对图片边缘。", whole_page_fallback: "整页原图包含其他内容，可先框选需要的区域。" };
-      for (const flag of candidate.quality_flags || []) info.append(node("p", "figure-quality-note", warnings[flag] || "此候选有需要核对的版面信息。"));
-      const actions = node("div", "figure-candidate-actions");
-      const preview = btn("预览 / 调整范围", () => cropDialog(candidate, (box, side) => adopt(candidate, box, side), preview, state), disabled || !localImage(candidate.page_url));
-      actions.append(preview);
-      if (candidate.kind !== "page") actions.append(btn(state.adopted.has(candidate.id) ? "已加入本次编辑" : "采纳 →", () => adopt(candidate), disabled || state.adopted.has(candidate.id), "btn small"));
-      info.append(actions);
-      if (candidate.kind !== "page") info.append(checkPanel(state, candidate, () => candidate.bbox,
-        () => candidateCheckScope(candidate, state.job?.id, state.options.draft, state.options.media).side).element);
-      item.append(thumb, info);
-      return item;
-    }
-    if (figures.length) {
-      const list = node("div", "figure-candidates");
-      list.append(...figures.map(candidateView));
-      host.append(list);
-    }
-    if (pages.length) {
-      const details = node("details", "figure-page-fallback");
-      if (!figures.length) details.open = true;
-      details.append(node("summary", "", `整页原图备选 · ${pages.length} 页`), node("p", "helper", "整页包含其他内容或答案。它不是已定位的示意图，可手动裁剪后采纳。"));
-      details.append(...pages.map(candidateView));
-      host.append(details);
+    if (candidates.length) {
+      const pages = node("div", "figure-page-list");
+      for (const candidate of candidates) {
+        const open = btn("", () => cropDialog(candidate, (box, side) => adopt(candidate, box, side), open, state),
+          disabled || !localImage(candidate.page_url), "figure-page-choice");
+        open.setAttribute("aria-label", `裁剪第 ${candidate.page} 页`);
+        const preview = node("img"); preview.alt = `讲义第 ${candidate.page} 页`; preview.loading = "lazy";
+        if (localImage(candidate.preview_url)) preview.src = candidate.preview_url;
+        preview.addEventListener("error", () => preview.remove(), { once: true });
+        open.append(preview, node("span", "", `第 ${candidate.page} 页 · 裁剪`)); pages.append(open);
+      }
+      host.append(pages);
+    } else if (!running && !state.error && !state.job) {
+      host.append(node("p", "helper", "从本卡引用页裁剪图片，默认放在答案侧。"));
     }
   }
   return { create, changed, sameSource, sameCheckSource, checkKey, candidateCheckScope, notifyCheckPanels, validBox, dragBox, localImage };

@@ -35,7 +35,6 @@
     function render() {
       const opened = new Set([...body.querySelectorAll("details[open]")].map(n => n.querySelector("summary")?.textContent));
       body.replaceChildren();
-      body.append(node("p", "配置一次后，可把已批准的卡片和图片直接同步到 Anki，保留复习进度。同步不会调用云端模型。", "helper"));
       if (error || loadError) { const alert = node("div", error || loadError, "notice warning"); alert.setAttribute("role", "alert"); body.append(alert); }
       if (message) { const note = node("p", message, "helper"); note.setAttribute("role", "status"); body.append(note); }
       if (!setup) { body.append(button("重新检查", () => load(true))); return; }
@@ -49,7 +48,7 @@
       }
       body.append(a);
       const installed = native?.addon?.installed && native.addon.version === setup.addon_version;
-      const b = step("2 · 安装插件并配对", installed ? `已发现插件 ${native.addon.version}。连接状态以下方真实回执为准。` : "把随安装包提供的插件装入 Anki，并自动配置本机连接。");
+      const b = step("2 · 安装插件并配对", installed ? `已安装插件 ${native.addon.version}` : "首次使用需安装同步插件。");
       if (desktop) {
         if (native?.running) b.append(node("p", "Anki 正在运行。请正常退出 Anki 后刷新，再安装或更新插件。", "notice warning"));
         b.append(button(installed ? "检查并更新插件" : "安装并配对插件", async () => { await enable(); const result = await desktop("install"); native = result.native; return result.changed ? "插件已安装并配对，请重新打开 Anki。" : "插件已是当前版本，配对配置保持不变。"; }, !native?.executable || !native?.dataReady || native?.running || !setup.addon_available));
@@ -64,12 +63,12 @@
         b.append(detail);
       }
       body.append(b);
-      const c = step("3 · 打开 Anki，检查连接", setup.connected ? `已连接 · 插件 ${setup.plugin_version} · 最近收到心跳回执。` : "等待插件连接。安装后请重新打开 Anki 并进入资料；仍未连接时，检查「工具 → 插件」是否已启用 AnkiSense。");
+      const c = step("3 · 打开 Anki，检查连接", setup.connected ? `已连接 · 插件 ${setup.plugin_version}` : "等待连接，请打开 Anki 并进入资料。");
       c.dataset.connected = String(setup.connected);
       if (desktop) c.append(button("打开 Anki", () => desktop("launch").then(result => result.message), !native?.executable));
       c.append(button("刷新检查", () => load(true)));
       body.append(c);
-      const d = step("4 · 选择牌组，首次同步", "在 Anki 选择「工具 → AnkiSense · 同步卡片」，选择或新建目标牌组，然后点击「同步已批准卡片」。已有卡片保持复习进度。");
+      const d = step("4 · 选择牌组，首次同步", "在 Anki 打开「工具 → AnkiSense · 同步卡片」，选择牌组并点击「同步已批准卡片」。");
       if (setup.last_sync) {
         const s = setup.last_sync;
         const status = node("p", `最近同步：新增 ${s.added} · 更新 ${s.updated} · 未变化 ${s.unchanged} · 冲突 ${s.conflicts} · 跳过 ${s.excluded}`, "notice anki-sync-result");
@@ -77,13 +76,18 @@
         d.append(node("p", new Date(s.at * 1000).toLocaleString(), "helper"));
       } else d.append(node("p", "尚未收到同步完成回执。", "helper"));
       body.append(d);
+      const help = node("details", undefined, "help-details");
+      help.append(node("summary", "同步说明与故障排查"),
+        node("p", "同步图文卡片会保留复习进度，不调用云端模型。", "helper"),
+        node("p", "仍未连接时，检查 Anki「工具 → 插件」是否启用 AnkiSense，并确认已进入资料。", "helper"));
+      body.append(help);
       for (const detail of body.querySelectorAll("details")) detail.open = opened.has(detail.querySelector("summary")?.textContent);
     }
     guide.addEventListener("toggle", () => {
       clearTimeout(timer);
       if (guide.open) load(true);
     });
-    body.append(node("p", "打开向导后检查本机状态，不会自动安装或同步。", "helper"));
+    body.append(node("p", "正在读取连接状态…", "helper"));
     return guide;
   }
   root.AnkiSetup = { create };

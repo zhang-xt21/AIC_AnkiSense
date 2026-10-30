@@ -17,7 +17,7 @@ import genanki
 from fastapi import HTTPException
 
 from .evidence import validate_card
-from .media import EXPORT_COLUMNS, MAX_EXPORT_BYTES, MAX_UPLOAD_BYTES, html_text, normalize_image, require_media
+from .media import EXPORT_COLUMNS, MAX_UPLOAD_BYTES, html_text, normalize_image, require_media
 from .schemas import CardDraft, SourceBlock
 from .approval import require_approved_sources, require_image_source
 
@@ -206,7 +206,7 @@ def note_fields(card, values):
     return fields
 
 
-def build_apkg(rows, store, storage: Path) -> bytes:
+def build_apkg(rows, store, storage: Path, destination: Path | None = None):
     """Build with genanki's DB writer inside an owned, automatically cleaned dir.
 
     genanki 0.13.1's write_to_file leaves its mkstemp DB behind. Calling the DB
@@ -214,41 +214,39 @@ def build_apkg(rows, store, storage: Path) -> bytes:
     """
     model = anki_model()
     deck = genanki.Deck(DECK_ID, DECK_NAME)
-    assets = {}
-    total = len(CSS.encode("utf-8")) + len(FRONT.encode("utf-8")) + len(BACK.encode("utf-8"))
-    for card, values in rows:
-        if card["status"] != "approved":
-            continue
-        require_exportable(card, store)
-        fields = note_fields(card, values)
-        for attachment in card.get("images") or []:
-            _, path = require_media(store, storage, attachment["media_id"], card["document_id"])
-            identifier = attachment["media_id"]
-            if identifier not in assets:
+    with TemporaryDirectory(prefix="ankisense-apkg-") as temporary:
+        assets = {}
+        for card, values in rows:
+            if card["status"] != "approved":
+                continue
+            require_exportable(card, store)
+            fields = note_fields(card, values)
+            for attachment in card.get("images") or []:
+                _, path = require_media(store, storage, attachment["media_id"], card["document_id"])
+                identifier = attachment["media_id"]
+                if identifier in assets:
+                    continue
                 try:
                     with path.open("rb") as source:
                         content = source.read(MAX_UPLOAD_BYTES + 1)
                 except FileNotFoundError as error:
                     raise HTTPException(404, "图片文件不存在，请重新添加图片。") from error
                 if len(content) > MAX_UPLOAD_BYTES:
-                    raise HTTPException(413, "图片文件超过导出限制，请重新添加图片。")
+                    raise HTTPException(413, "图片文件超过单张限制，请重新添加图片。")
                 if not content.startswith(b"\x89PNG\r\n\x1a\n"):
                     raise HTTPException(422, "卡片图片已损坏，请重新添加图片后再导出。")
                 try:
                     png, _, _ = normalize_image(content)
                 except HTTPException as error:
                     raise HTTPException(error.status_code, "卡片图片无法读取或超过限制，请重新添加图片后再导出。") from error
-                assets[identifier] = png
-                total += len(png)
-        total += sum(len(field.encode("utf-8")) for field in fields)
-        if total > MAX_EXPORT_BYTES:
-            raise HTTPException(413, "导出包超过 50 MiB，请减少本次已审核卡片或图片。")
-        deck.add_note(genanki.Note(model=model, fields=fields,
-                                  guid=note_guid(card["id"]), tags=note_tags(card),
-                                  due=len(deck.notes) + 1))
-    if not deck.notes:
-        raise HTTPException(422, "还没有已批准的卡片，请先到卡片审核页批准卡片。")
-    with TemporaryDirectory(prefix="ankisense-apkg-") as temporary:
+                cached = Path(temporary) / media_filename(identifier)
+                cached.write_bytes(png)
+                assets[identifier] = cached
+            deck.add_note(genanki.Note(model=model, fields=fields,
+                                      guid=note_guid(card["id"]), tags=note_tags(card),
+                                      due=len(deck.notes) + 1))
+        if not deck.notes:
+            raise HTTPException(422, "还没有已批准的卡片，请先到卡片审核页批准卡片。")
         database = Path(temporary) / "collection.anki2"
         timestamp = time.time()
         connection = sqlite3.connect(database)
@@ -257,15 +255,13 @@ def build_apkg(rows, store, storage: Path) -> bytes:
             connection.commit()
         finally:
             connection.close()
-        if database.stat().st_size + sum(map(len, assets.values())) > MAX_EXPORT_BYTES:
-            raise HTTPException(413, "导出包超过 50 MiB，请减少本次已审核卡片或图片。")
-        output = io.BytesIO()
-        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        output = Path(destination) if destination is not None else Path(temporary) / "export.apkg"
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
             archive.write(database, "collection.anki2")
             media = {str(index): media_filename(identifier) for index, identifier in enumerate(assets)}
             archive.writestr("media", json.dumps(media, ensure_ascii=False))
-            for index, content in enumerate(assets.values()):
-                archive.writestr(str(index), content)
-        if output.tell() > MAX_EXPORT_BYTES:
-            raise HTTPException(413, "导出包超过 50 MiB，请减少本次已审核卡片或图片。")
-        return output.getvalue()
+            for index, image in enumerate(assets.values()):
+                archive.write(image, str(index))
+        # Legacy Python callers may request bytes; HTTP downloads always supply
+        # a destination and serve it directly, without loading the archive.
+        return output.read_bytes() if destination is None else output

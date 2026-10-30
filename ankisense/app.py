@@ -14,6 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .db import Store
+from .card_deletion import delete_cards
+from .downloads import ExportResponse, TemporaryDirectory, export_error
 from .apkg import build_apkg, export_snapshot, require_exportable
 from .approval import require_image_source, require_required_image, display_card
 from .attempts import AttemptService
@@ -198,13 +200,29 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
     def health():
         return {"application": "AnkiSense", "api_version": 1,
                 "status": "ok", "mode": app.state.settings.mode,
-                "app_version": APP_VERSION, "capabilities": {"anki_setup": True, "ai_connection_test": True, "ai_task_switch": True}}
+                "app_version": APP_VERSION, "capabilities": {"anki_setup": True, "ai_connection_test": True, "ai_task_switch": True, "large_exports": True}}
 
     @app.get("/api/state")
     def state():
         settings = app.state.settings
         cards = [display_card(store, card) for card in store.all("cards")]
         return {"app_version": APP_VERSION, "mode": settings.mode, "model": settings.model if settings.mode == "cloud" else "内置演示规则", "configured": public_settings(settings)["configured"], "model_connection": app.state.model_connection, "image_check": image_checks.status(), "generation_jobs": generation_jobs.list_jobs(), **{name: store.all(name) for name in ("documents", "blocks", "attempts", "source_proposals", "media")}, "cards": cards, "source_pages": [with_quality(page) for page in store.all("source_pages")]}
+
+    @app.delete("/api/cards/{identifier}")
+    def delete_card(identifier: str):
+        return delete_cards(store, card_id=identifier)
+
+    @app.delete("/api/documents/{identifier}/cards")
+    def clear_document_cards(identifier: str, expected_count: int):
+        if expected_count < 0:
+            raise HTTPException(422, "卡片数量不能为负数。")
+        return delete_cards(store, document_id=identifier, expected_count=expected_count)
+
+    @app.delete("/api/documents/{identifier}")
+    def delete_document(identifier: str, expected_count: int):
+        if expected_count < 0:
+            raise HTTPException(422, "卡片数量不能为负数。")
+        return delete_cards(store, document_id=identifier, expected_count=expected_count, remove_document=True)
 
     @app.post("/api/demo")
     def demo():
@@ -484,10 +502,12 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
     async def retry(identifier: str):
         return await app.state.attempts.retry(identifier)
 
-    def export_records(request, reader=None):
+    def export_records(request, reader=None, document_id=None):
         source = reader or store
+        if document_id:
+            get_record("documents", document_id, reader)
         for card in source.all("cards"):
-            if card["status"] != "approved":
+            if card["status"] != "approved" or (document_id and card["document_id"] != document_id):
                 continue
             require_exportable(card, source)
             document = get_record("documents", card["document_id"], reader)
@@ -496,27 +516,40 @@ def create_app(data_dir: Path | None = None, settings: Settings | None = None, a
             yield card, [card["id"], card["question"], card["answer"], card["concept"], document["filename"], pages, "\n".join(entry["quote"] for entry in card["evidence"]), f"{str(request.base_url).rstrip('/')}/?card={card['id']}"]
 
     @app.get("/api/export")
-    def export(request: Request):
+    def export(request: Request, document_id: str | None = None):
         with export_snapshot(store) as snapshot:
             stream = io.StringIO(newline="")
             # Anki import directives; data has no header note and HTML is disabled.
             stream.write(f"#separator:Tab\n#html:false\n#columns:{EXPORT_COLUMNS}\n")
             writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
-            for _, values in export_records(request, snapshot):
+            for _, values in export_records(request, snapshot, document_id):
                 writer.writerow(values)
         return Response(stream.getvalue().encode("utf-8"), media_type="text/tab-separated-values; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="ankisense-approved.tsv"'})
 
+    def archive_response(request, builder, filename, media_type, document_id):
+        try:
+            temporary = TemporaryDirectory(prefix="ankisense-download-")
+        except OSError as error:
+            raise export_error(error) from error
+        try:
+            target = Path(temporary.name) / filename
+            with export_snapshot(store) as snapshot:
+                builder(export_records(request, snapshot, document_id), snapshot, storage, target)
+            return ExportResponse(target, temporary, filename=filename, media_type=media_type)
+        except OSError as error:
+            temporary.cleanup()
+            raise export_error(error) from error
+        except BaseException:
+            temporary.cleanup()
+            raise
+
     @app.get("/api/export/media")
-    def export_with_media(request: Request):
-        with export_snapshot(store) as snapshot:
-            content = media_zip(export_records(request, snapshot), snapshot, storage)
-        return Response(content, media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="ankisense-approved-media.zip"'})
+    def export_with_media(request: Request, document_id: str | None = None):
+        return archive_response(request, media_zip, "ankisense-approved-media.zip", "application/zip", document_id)
 
     @app.get("/api/export/apkg")
-    def export_deck(request: Request):
-        with export_snapshot(store) as snapshot:
-            content = build_apkg(export_records(request, snapshot), snapshot, storage)
-        return Response(content, media_type="application/octet-stream", headers={"Content-Disposition": 'attachment; filename="ankisense-approved.apkg"'})
+    def export_deck(request: Request, document_id: str | None = None):
+        return archive_response(request, build_apkg, "ankisense-approved.apkg", "application/octet-stream", document_id)
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 

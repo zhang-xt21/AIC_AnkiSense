@@ -70,6 +70,9 @@ def install(context, method, source_status="pending", *, picture=False, required
             "rubric": [{"point_id": "lifo", "text": "The last inserted item leaves first."}],
             "evidence": [{"block_id": block["block_id"], "quote": "last inserted item first"}],
             "status": "approved", "version": 1, "images": [], "is_demo": False}
+    reference = Diagnosis(verdict="correct", addressed_point_ids=["lifo"], missing_point_ids=[],
+                          contradicted_point_ids=[], answer_spans=[card["answer"]],
+                          source_block_ids=[block["block_id"]], reason="Offline reference-answer receipt.").model_dump()
     media = None
     if picture:
         png = io.BytesIO()
@@ -85,7 +88,9 @@ def install(context, method, source_status="pending", *, picture=False, required
         card["approval"] = {"method": "human", "card_version": 1, "approved_at": "fixture"}
     elif method == "automatic":
         card["approval_method"] = "automatic"
-        card["auto_quality"] = {"verdict": "clear", "issues": [], "scope": "text_and_original_page", "card_version": 1}
+        card["auto_quality"] = {"verdict": "clear", "issues": [], "scope": "text_and_original_page", "card_version": 1,
+                                "reference_answer_check": reference,
+                                "minimal_answer_check": {"answer": card["answer"], "diagnosis": reference}}
         card["automatic_evidence"] = {"policy": POLICY, "visual_check": True, "card_hash": content_hash(card),
                                       "block_hash": block_hash(blocks), "page_images": {"1": "a" * 64}}
     elif method == "machine":
@@ -105,6 +110,8 @@ def install(context, method, source_status="pending", *, picture=False, required
         store.put("card_auto_reviews", {"id": review_id, "review_id": review_id, "card_id": card["id"], "card_version": 1,
                                        "policy_version": MACHINE_APPROVAL_POLICY, "prompt_version": CARD_REVIEW_PROMPT_VERSION,
                                        "status": "auto_pass", "retryable": False, "card_binding_hash": card_binding_hash(card),
+                                       "reference_answer_check": reference,
+                                       "minimal_answer_check": {"answer": card["answer"], "diagnosis": reference},
                                        "source_blocks": [block], "source_pages": {"1": {key: page[key] for key in ("revision", "block_ids", "text")}},
                                        "image_bindings": bindings})
     store.put("cards", card)
@@ -126,6 +133,20 @@ def assert_access(context, card, allowed):
         assert response.json()["status"] == "completed"
     else:
         assert store.all("attempts") == []
+
+
+@pytest.mark.parametrize("method", ["automatic", "machine"])
+def test_missing_reference_answer_receipt_blocks_every_learning_consumer(integrated, method):
+    _client, store, _headers = integrated
+    card, _page, _media = install(integrated, method, "reviewed")
+    if method == "automatic":
+        card["auto_quality"].pop("reference_answer_check")
+        store.put("cards", card)
+    else:
+        record = store.get("card_auto_reviews", card["approval"]["review_id"])
+        record.pop("reference_answer_check")
+        store.put("card_auto_reviews", record)
+    assert_access(integrated, card, False)
 
 
 @pytest.mark.parametrize("method", ["legacy", "human", "automatic", "machine"])

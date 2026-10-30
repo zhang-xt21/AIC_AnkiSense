@@ -16,7 +16,6 @@ from fastapi.responses import FileResponse
 from PIL import Image
 
 from .evidence import validate_card
-from .figure_context import compose_context
 from .media import normalize_image, save_media
 from .ocr import render_page_png
 from .schemas import CardDraft, ImageRecommendationAdoptRequest, ImageRecommendationRequest, SourceBlock
@@ -24,7 +23,8 @@ from .sources import page_id, require_current_source
 
 
 _PIPELINE_LOCK = threading.Lock()
-RECOMMENDATION_VERSION = "citation-page-ranking-v6-context"
+RECOMMENDATION_VERSION = "citation-pages-v7"
+PAGE_RENDERER_VERSION = "pdf-page-v1"
 _PUBLIC_CANDIDATE = ("id", "page", "kind", "bbox", "reason", "caption", "preview_url", "page_url", "source_revision")
 _OPTIONAL_CANDIDATE = ("original_bbox", "context_notes", "quality_flags")
 _CARD_BINDING_FIELDS = ("question", "concept", "evidence")
@@ -67,48 +67,6 @@ def _crop(content, bbox):
             output = io.BytesIO()
             cropped.save(output, "PNG")
     return normalize_image(output.getvalue())
-
-
-def _tokens(text):
-    text = text.lower()
-    tokens = set(re.findall(r"[a-z0-9_]{2,}", text))
-    for part in re.findall(r"[\u4e00-\u9fff]+", text):
-        tokens.update(part[index:index + 2] for index in range(len(part) - 1))
-    return tokens
-
-
-def _semantic_tokens(text):
-    # Numbers and operator-only text cannot establish a topic match. Keep
-    # meaningful identifiers and Chinese bigrams, rather than dropping tables
-    # and equations just because their recognised labels contain only symbols.
-    return {token for token in _tokens(text) if any(character.isalpha() for character in token)}
-
-
-def _padded_bbox(bbox):
-    """Leave room for arrowheads and labels beside an automatically found box."""
-    return [round(max(0.0, bbox[0] - .015), 7), round(max(0.0, bbox[1] - .015), 7),
-            round(min(1.0, bbox[2] + .015), 7), round(min(1.0, bbox[3] + .015), 7)]
-
-
-def _likely_decoration(region, targets):
-    """Exclude small corner ornaments and narrow header/footer decorations.
-
-    Nearby body text and captions can be assigned from elsewhere on a slide.
-    Without caption coordinates, even matching text cannot rescue a small
-    corner ornament. A matching caption can still rescue a wider header/footer
-    diagram that does not meet the small-corner geometry.
-    Touching a left or right page edge alone is not evidence of decoration:
-    slide diagrams often occupy those positions without a separate caption.
-    """
-    x0, y0, x1, y1 = region["bbox"]
-    width, height = x1 - x0, y1 - y0
-    area = width * height
-    in_header_footer = y1 <= .15 or y0 >= .88
-    in_corner = (width <= .30 and height <= .30
-                 and (x0 <= .04 or x1 >= .96)
-                 and (y0 <= .04 or y1 >= .96))
-    return (area <= .15 and (in_corner or
-            (in_header_footer and not targets.intersection(_semantic_tokens(region["caption"])))))
 
 
 class RecommendationService:
@@ -195,11 +153,7 @@ class RecommendationService:
     async def start(self, card_id: str, body: ImageRecommendationRequest):
         async with self.start_lock:
             captured = await asyncio.to_thread(self._capture, card_id, body.card_version)
-            try:
-                from .docling_adapter import PARSER_VERSION
-                pipeline = str(PARSER_VERSION)
-            except ImportError:
-                pipeline = "unavailable"
+            pipeline = PAGE_RENDERER_VERSION
             identity = {"card_id": card_id, "card_version": body.card_version, "pdf_hash": captured["pdf_hash"],
                         "pages": captured["pages"], "source_revisions": captured["source_revisions"], "requested_parser_version": pipeline,
                         "recommendation_version": RECOMMENDATION_VERSION}
@@ -213,7 +167,7 @@ class RecommendationService:
                 raise HTTPException(429, "已有多个配图任务排队，请等待当前任务完成。")
             job = {"id": "figjob-" + uuid4().hex, **identity, "document_id": captured["document_id"],
                    "card_binding": {key: captured["card"][key] for key in _CARD_BINDING_FIELDS},
-                   "status": "pending", "message": "已排队，正在本机准备引用页配图。", "candidates": [], "created_at": _now()}
+                   "status": "pending", "message": "正在准备引用页原图。", "candidates": [], "created_at": _now()}
             self.store.put_many([("figure_jobs", job)], check=lambda: self._assert_current(job))
             task = asyncio.create_task(asyncio.to_thread(self._run, job["id"]))
             self.tasks.add(task)
@@ -227,7 +181,7 @@ class RecommendationService:
         def build():
             job = self._job(job_id)
             if job["status"] in {"pending", "running"}:
-                job.update(status="failed", message="已取消推荐；正在执行的本地解析会在结束后释放资源。", finished_at=_now())
+                job.update(status="failed", message="已取消原图准备。", finished_at=_now())
                 return [("figure_jobs", job)]
             return []
         self.store.mutate(build)
@@ -251,123 +205,40 @@ class RecommendationService:
     def _page_path(self, job, page):
         return self.storage / "figure-previews" / job["id"] / f"page-{page}.png"
 
-    def _regions(self, captured):
-        from .docling_adapter import PARSER_VERSION, extract_regions
-        cached, missing = {}, []
-        for page in captured["pages"]:
-            key = "figpage-" + _hash(f"{captured['pdf_hash']}:{PARSER_VERSION}:{page}".encode())
-            record = self.store.get("figure_pages", key)
-            if record and not record.get("warning") and isinstance(record.get("regions_truncated"), bool):
-                cached[page] = record
-            else:
-                missing.append((page, key))
-        warning = None
-        partial_failure = False
-        if missing:
-            result = extract_regions(captured["path"], [page for page, _ in missing], self.storage / "figure-cache")
-            page_results = {item["page"]: item for item in result.get("pages", [])}
-            for page, key in missing:
-                item = page_results.get(page)
-                missing_page = item is None
-                if missing_page:
-                    item = {"page": page, "regions": [], "warning": "未得到该引用页的图块，可稍后重试。"}
-                regions = []
-                for region in item.get("regions", [])[:100]:
-                    if region.get("kind") in {"picture", "table"} and _valid_bbox(region.get("bbox")):
-                        regions.append({"bbox": region["bbox"], "kind": region["kind"],
-                                        "caption": str(region.get("caption", ""))[:500], "nearby_text": str(region.get("nearby_text", ""))[:2000],
-                                        "caption_refs": region.get("caption_refs", [])})
-                record = {"id": key, "pdf_hash": captured["pdf_hash"], "parser_version": PARSER_VERSION,
-                          "page": page, "regions": regions,
-                          "regions_truncated": len(item.get("regions", [])) > 100,
-                          "warning": item.get("warning"), "created_at": _now()}
-                if isinstance(item.get("text_regions"), list):
-                    record["text_regions"] = item["text_regions"]
-                failed_page = missing_page or bool(item.get("warning"))
-                if not failed_page:
-                    self.store.put("figure_pages", record)
-                partial_failure = partial_failure or failed_page
-                cached[page] = record
-        warnings = [str(record["warning"]) for record in cached.values() if record.get("warning")]
-        warning = "；".join(warnings)[:600] if warnings else None
-        return cached, str(PARSER_VERSION), warning, partial_failure
 
     def _run(self, job_id):
         with _PIPELINE_LOCK:
-            job = self._transition(job_id, {"pending"}, status="running", message="正在本机分析引用页图块，请稍候。")
+            job = self._transition(job_id, {"pending"}, status="running", message="正在准备引用页原图。")
             if not job:
                 return
             try:
                 captured = self._assert_current(job)
-                parser_failed = False
-                try:
-                    regions, parser_version, warning, parser_failed = self._regions(captured)
-                except Exception as error:
-                    regions, parser_version = {}, "unavailable"
-                    parser_failed = True
-                    reasons = {"unavailable": "尚未安装本地图块解析组件", "models_missing": "本地图块解析模型尚未准备好",
-                               "timeout": "本地图块解析超时", "invalid_pdf": "图块解析器无法读取这份 PDF", "parse_failed": "本地图块解析未完成"}
-                    reason = reasons.get(getattr(error, "code", ""), "图块识别未完成")
-                    warning = reason + "，仅显示引用页原图；可手动框选，或稍后重试推荐。"
-                if self._job(job_id)["status"] != "running":
-                    return
-                self._assert_current(job)
-                targets = _semantic_tokens(" ".join([captured["card"]["question"], captured["card"]["concept"]]
-                                          + [entry["quote"] for entry in captured["card"]["evidence"]]))
-                ranked = []
-                for page in job["pages"]:
-                    for region in regions.get(page, {}).get("regions", []):
-                        bbox = region["bbox"]
-                        area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-                        if area < .008 or area > .94:
-                            continue
-                        if _likely_decoration(region, targets):
-                            continue
-                        text = region["caption"] + " " + region["nearby_text"]
-                        region_tokens = _semantic_tokens(text)
-                        overlap = targets.intersection(region_tokens)
-                        if region_tokens and not overlap:
-                            continue
-                        reason = (f"第 {page} 页同页候选，图注或邻文有文字匹配；尚未精确定位引文对应图片，请核对图意。" if overlap
-                                  else f"第 {page} 页同页候选；尚未确认内容关联，也未精确定位引文对应图片。")
-                        ranked.append((len(overlap), area, page, region, reason))
-                ranked.sort(key=lambda item: (-item[0], -item[1], item[2]))
-                focus = captured["card"]["question"] + " " + captured["card"]["concept"]
-                choices = [{"page": page, "kind": region["kind"], "reason": reason, "caption": region["caption"],
-                            **compose_context(region, regions.get(page, {}), focus)}
-                           for _, _, page, region, reason in ranked[:3]]
-                choices.extend({"page": page, "kind": "page", "bbox": [0.0, 0.0, 1.0, 1.0],
-                                "reason": "整页原图备选，未识别为独立配图；可手动框选需要的区域。", "caption": f"第 {page} 页原图",
-                                "original_bbox": [0.0, 0.0, 1.0, 1.0], "context_notes": [], "quality_flags": ["whole_page_fallback"]}
-                               for page in job["pages"])
                 content = captured["path"].read_bytes()
                 if _hash(content) != job["pdf_hash"]:
-                    raise HTTPException(409, "原始 PDF 已更新，请重新获取推荐。")
-                for page in job["pages"]:
-                    _atomic_write(self._page_path(job, page), render_page_png(content, page))
+                    raise HTTPException(409, "原始 PDF 已更新，请重新选择原图。")
                 candidates = []
-                for choice in choices:
-                    page, kind, bbox = choice["page"], choice["kind"], choice["bbox"]
-                    identifier = "fig-" + uuid4().hex
-                    candidate = {"id": identifier, **choice, "source_revision": job["source_revisions"][str(page)],
-                                 "preview_url": f"/api/image-recommendations/{job_id}/candidates/{identifier}/image",
+                for page in job["pages"]:
+                    if self._job(job_id)["status"] != "running":
+                        return
+                    cache = self.storage / "figure-cache" / "pages" / f"{job['pdf_hash']}-{PAGE_RENDERER_VERSION}-{page}.png"
+                    if not cache.is_file():
+                        _atomic_write(cache, render_page_png(content, page))
+                    original = cache.read_bytes()
+                    _atomic_write(self._page_path(job, page), original)
+                    candidate = {"id": "fig-" + uuid4().hex, "page": page, "kind": "page", "bbox": [0., 0., 1., 1.],
+                                 "reason": "来自本卡引用页，可裁剪后加入卡片。", "caption": f"第 {page} 页原图",
+                                 "source_revision": job["source_revisions"][str(page)],
                                  "page_url": f"/api/image-recommendations/{job_id}/pages/{page}/image"}
-                    try:
-                        normalized = _crop(self._page_path(job, page).read_bytes(), bbox)
-                    except HTTPException:
-                        if kind == "page":
-                            raise
-                        continue
-                    _atomic_write(self._candidate_path(job, candidate), normalized[0])
+                    candidate["preview_url"] = candidate["page_url"]
+                    _atomic_write(self._candidate_path(job, candidate), original)
                     candidates.append(candidate)
-                self._assert_current(job)
-                message = warning if parser_failed else ("配图候选已就绪；采纳后仍需保存并审核卡片。" if any(item["kind"] != "page" for item in candidates) else "未找到可靠的独立配图，已提供引用页原图供手动框选。")
-                self._transition(job_id, {"running"}, check_current=True, status="completed", message=message, warning=warning,
-                                 parser_failed=parser_failed, parser_version=parser_version, candidates=candidates, finished_at=_now())
+                self._transition(job_id, {"running"}, check_current=True, status="completed", message="引用页原图已就绪。",
+                                 warning=None, parser_failed=False, parser_version=PAGE_RENDERER_VERSION,
+                                 candidates=candidates, finished_at=_now())
             except HTTPException as error:
-                self._transition(job_id, {"running"}, status="failed", message=str(error.detail), finished_at=_now())
+                self._transition(job_id, {"pending", "running"}, status="failed", message=str(error.detail), finished_at=_now())
             except Exception:
-                self._transition(job_id, {"running"}, status="failed", message="本地配图推荐未完成，请稍后重试；也可以手动上传图片。", finished_at=_now())
+                self._transition(job_id, {"pending", "running"}, status="failed", message="原图准备失败，请重试或上传截图。", finished_at=_now())
 
     def _candidate(self, job, candidate_id):
         candidate = next((item for item in job.get("candidates", []) if item["id"] == candidate_id), None)

@@ -19,7 +19,6 @@ MAX_INPUT_SIDE = 8192
 MAX_INPUT_PIXELS = 16_000_000
 MAX_IMAGE_SIDE = 2400
 MAX_IMAGE_PIXELS = 4_000_000
-MAX_EXPORT_BYTES = 50 * 1024 * 1024
 MEDIA_ID = re.compile(r"img-[0-9a-f]{32}\Z")
 EXPORT_COLUMNS = "NoteID\tQuestion\tAnswer\tConcept\tSourceFile\tPDFPage\tSourceQuote\tPracticeURL"
 IMPORT_INSTRUCTIONS = """AnkiSense 图片卡导入说明
@@ -117,15 +116,17 @@ def html_text(value) -> str:
     return html.escape(str(value), quote=True).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
 
 
-def media_zip(rows, store, storage: Path) -> bytes:
-    """Build an HTML TSV and referenced PNG files under one aggregate cap."""
-    tsv = io.BytesIO()
+def media_zip(rows, store, storage: Path, destination: Path | None = None):
+    """Write one image at a time; aggregate size is bounded by available disk."""
+    if destination is None:
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory(prefix="ankisense-media-") as temporary:
+            path = media_zip(rows, store, storage, Path(temporary) / "export.zip")
+            return path.read_bytes()
+    tsv = io.StringIO(newline="")
     header = f"#separator:Tab\n#html:true\n#columns:{EXPORT_COLUMNS}\n".encode("utf-8")
     instructions = IMPORT_INSTRUCTIONS.encode("utf-8")
-    tsv.write(header)
-    total = len(header) + len(instructions)
-    if total > MAX_EXPORT_BYTES:
-        raise HTTPException(413, "导出包超过 50 MiB，请减少本次已审核卡片或图片。")
+    tsv.write(header.decode("utf-8"))
     assets = {}
     for card, values in rows:
         fields = [html_text(value) for value in values]
@@ -134,9 +135,8 @@ def media_zip(rows, store, storage: Path) -> bytes:
             identifier = record["id"]
             if identifier not in assets:
                 size = path.stat().st_size
-                total += size
-                if size > MAX_UPLOAD_BYTES or total > MAX_EXPORT_BYTES:
-                    raise HTTPException(413, "图片导出包超过 50 MiB，请减少本次已审核卡片或图片。")
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, "图片文件超过单张限制，请重新添加图片。")
                 assets[identifier] = (path, size)
             caption = html_text(attachment.get("caption", ""))
             field = 1 if attachment.get("side", "answer") == "question" else 2
@@ -147,13 +147,8 @@ def media_zip(rows, store, storage: Path) -> bytes:
                 fields[field] += f"<br>{caption}"
         row = io.StringIO(newline="")
         csv.writer(row, delimiter="\t", lineterminator="\n").writerow(fields)
-        data = row.getvalue().encode("utf-8")
-        total += len(data)
-        if total > MAX_EXPORT_BYTES:
-            raise HTTPException(413, "导出包超过 50 MiB，请减少本次已审核卡片或图片。")
-        tsv.write(data)
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        tsv.write(row.getvalue())
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
         archive.writestr("ankisense-approved.tsv", tsv.getvalue())
         archive.writestr("导入说明.txt", instructions)
         for identifier, (path, expected_size) in assets.items():
@@ -162,12 +157,5 @@ def media_zip(rows, store, storage: Path) -> bytes:
                 content = source.read(MAX_UPLOAD_BYTES + 1)
             if len(content) > MAX_UPLOAD_BYTES:
                 raise HTTPException(413, "图片文件超过导出限制，请重新添加图片。")
-            total += len(content) - expected_size
-            if total > MAX_EXPORT_BYTES:
-                raise HTTPException(413, "导出包超过 50 MiB，请减少本次已审核卡片或图片。")
             archive.writestr(f"media/ankisense-{identifier}.png", content)
-            if output.tell() > MAX_EXPORT_BYTES:
-                raise HTTPException(413, "导出包超过 50 MiB，请减少本次已审核卡片或图片。")
-    if output.tell() > MAX_EXPORT_BYTES:
-        raise HTTPException(413, "导出包超过 50 MiB，请减少本次已审核卡片或图片。")
-    return output.getvalue()
+    return Path(destination)

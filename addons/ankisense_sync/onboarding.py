@@ -3,7 +3,7 @@ from pathlib import Path
 
 from .client import PluginClient
 
-VERSION = "0.2.0"
+VERSION = "0.3.2"
 SETUP_KEY = "ankisense_sync_setup_id"
 
 

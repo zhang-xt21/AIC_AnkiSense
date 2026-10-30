@@ -59,7 +59,7 @@ def test_same_data_after_changing_working_directory(moved_project, monkeypatch, 
 
 @pytest.mark.parametrize("explicit", [False, True])
 def test_plugin_cli_and_server_share_relative_storage(moved_project, monkeypatch, capsys, explicit):
-    from tools import plugin_connection
+    from tools.anki import plugin_connection
 
     root, outside, create_app = moved_project
     monkeypatch.setenv("ANKISENSE_DATA_DIR", "./environment data")
@@ -82,15 +82,15 @@ def test_copied_source_runs_from_another_directory(tmp_path):
     root = tmp_path / "迁移后的 AnkiSense"
     root.mkdir()
     shutil.copytree(paths.ROOT / "ankisense", root / "ankisense", ignore=shutil.ignore_patterns("__pycache__"))
-    (root / "tools").mkdir()
-    shutil.copyfile(paths.ROOT / "tools/plugin_connection.py", root / "tools/plugin_connection.py")
+    (root / "tools/anki").mkdir(parents=True)
+    shutil.copyfile(paths.ROOT / "tools/anki/plugin_connection.py", root / "tools/anki/plugin_connection.py")
     (root / ".env").write_text("AI_MODE=demo\nANKISENSE_DATA_DIR=./shared-data\n", encoding="utf-8")
     outside = tmp_path / "终端目录"
     outside.mkdir()
     env = {key: value for key, value in os.environ.items() if key not in {"ANKISENSE_DATA_DIR", "PYTHONPATH"}}
     env.update(AI_MODE="demo", AI_API_KEY="", AI_MODEL="", AI_BASE_URL="", PYTHONDONTWRITEBYTECODE="1")
     result = subprocess.run(
-        [sys.executable, "-X", "utf8", str(root / "tools/plugin_connection.py"), "init"],
+        [sys.executable, "-X", "utf8", str(root / "tools/anki/plugin_connection.py"), "init"],
         cwd=outside, env=env, capture_output=True, text=True, encoding="utf-8", check=True, timeout=30,
     )
     initialized = json.loads(result.stdout)

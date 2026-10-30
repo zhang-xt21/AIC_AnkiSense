@@ -54,13 +54,13 @@ def test_catalog_is_full_deterministic_and_read_only(sync):
     before = sync.store.all("cards")
     first = sync.catalog(BASE)
     assert first == sync.catalog(BASE + "/")
-    assert set(first) == {"protocol_version", "snapshot_id", "complete", "cards", "excluded"}
+    assert set(first) == {"protocol_version", "snapshot_id", "complete", "cards", "excluded", "documents"}
     assert first["complete"] is True and first["protocol_version"] == 1
     assert [item["id"] for item in first["cards"]] == ["demo-queue", "demo-stack"]
     assert len(first["snapshot_id"]) == 64
     assert first["excluded"] == []
     summary = first["cards"][0]
-    assert set(summary) == {"id", "version", "guid", "content_hash", "url", "media"}
+    assert set(summary) == {"id", "version", "guid", "content_hash", "url", "media", "document_id"}
     assert summary["url"] == f"{BASE}/api/plugin/v1/cards/demo-queue?expected_hash={summary['content_hash']}"
     assert sync.store.all("cards") == before
 

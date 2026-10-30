@@ -14,7 +14,7 @@ from fastapi.responses import Response
 
 from .plugin_api import local_base_url
 
-ADDON_VERSION = "0.2.0"
+ADDON_VERSION = "0.3.2"
 ADDON_FILES = ("__init__.py", "ui.py", "onboarding.py", "answer_ui.py", "answer_journal.py", "client.py",
                "transport.py", "collection_sync.py", "manifest.json", "config.json", "config.md", "bootstrap.apkg")
 ADDON_ROOT = Path(__file__).resolve().parents[1] / "addons" / "ankisense_sync"

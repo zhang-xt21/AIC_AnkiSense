@@ -13,16 +13,16 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .evidence import validate_card
-from .figure_recommendations import _crop, _likely_decoration, _now, _padded_bbox, _semantic_tokens, _valid_bbox
+from .figure_recommendations import _crop, _now, _valid_bbox
 from .figure_vision import CARD_FIELDS, PROMPT_VERSION, VisualResult, VisionError, build_prompt, capability, run_enrichment, safe_diagnostics
 from .media import MAX_UPLOAD_BYTES, require_media, normalize_image
 from .ocr import render_page_png
 from .schemas import CardDraft, SourceBlock
 from .sources import page_id, require_current_source, source_available, invalidate_approval
-from .figure_vision import _digest
+from .figure_vision import _digest, verdict
 
 
-POLICY_VERSION = "saved-diagram-auto-review-v3-decorations"
+POLICY_VERSION = "saved-picture-auto-review-v5-side-aware"
 MAX_PDF_BYTES = 50 * 1024 * 1024
 
 
@@ -33,37 +33,6 @@ class AutoCheckRequest(BaseModel):
 
 def _sha(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
-
-
-def _content_regions(regions, targets):
-    """Remove only the same obvious picture ornaments as recommendation ranking.
-
-    Work from the full original layout, not ranked/limited candidates. Unknown
-    regions and tables always remain ambiguous; missing captions are simply empty
-    captions, while nearby body text cannot rescue a small page-corner ornament.
-    """
-    result = []
-    for region in regions:
-        if not isinstance(region, dict) or not _valid_bbox(region.get("bbox")):
-            return None
-        caption = region.get("caption")
-        normalized = {**region, "caption": caption if isinstance(caption, str) else ""}
-        if region.get("kind") == "picture" and _likely_decoration(normalized, targets):
-            continue
-        result.append(region)
-    return result
-
-
-def _matches_original_region(candidate, region):
-    original = candidate.get("original_bbox")
-    actual = region["bbox"]
-    if original is not None:
-        return _valid_bbox(original) and all(abs(a - b) <= .000001 for a, b in zip(original, actual))
-    # Older recommendation records only stored the final padded box. Support
-    # the known legacy crop, not arbitrary large crops containing this region.
-    cropped = candidate.get("bbox")
-    return _valid_bbox(cropped) and any(all(abs(a - b) <= .000001 for a, b in zip(cropped, expected))
-                                       for expected in (actual, _padded_bbox(actual)))
 
 
 class ImageAutoReviewService:
@@ -121,7 +90,7 @@ class ImageAutoReviewService:
         source_page = cited_source_pages.get(str(page)) if isinstance(page, int) and page >= 1 else None
         page_mode = source.get("origin") == "automatic_source_page"
         if source.get("origin") not in {"figure_recommendation", "automatic_source_page"}:
-            reasons.append("只有从讲义独立图块推荐中采纳的图片可以自动通过；手动配图请人工核对。")
+            reasons.append("图片缺少可验证的讲义来源，请从引用页裁剪添加。")
         if (not page_mode and source.get("card_id") != card_id) or page not in cited_pages:
             reasons.append("图片未绑定当前卡片明确引用的讲义页。")
         if (not source_available(source_page)
@@ -148,44 +117,12 @@ class ImageAutoReviewService:
             candidate = next((item for item in job.get("candidates", []) if item.get("id") == source.get("candidate_id")), None) if job else None
             if not job or job.get("card_id") != card_id or job.get("document_id") != card["document_id"] or job.get("status") != "completed":
                 reasons.append("原配图推荐记录不可用。")
-            elif (job.get("parser_failed") or job.get("warning") or job.get("parser_version") in {None, "unavailable"}
-                  or job.get("pdf_hash") != pdf_hash):
-                reasons.append("原图块解析不完整或含有警告，需人工核对。")
-            if not candidate or candidate.get("page") != page or candidate.get("kind") != "picture":
-                reasons.append("整页原图、表格或未识别为独立图块的图片需人工核对。")
-            else:
-                if candidate.get("quality_flags"):
-                    reasons.append("图块或图注存在质量提示，需人工核对。")
-                if source.get("bbox") != candidate.get("bbox"):
-                    reasons.append("图片曾手动调整裁剪范围，需人工核对。")
-                if candidate.get("source_revision") != source.get("revision"):
-                    reasons.append("推荐图块与保存图片的讲义版本不一致。")
-                matching = [item for item in job.get("candidates", [])
-                            if item.get("page") == page and item.get("kind") == "picture"]
-                if len(matching) != 1:
-                    reasons.append("本页有多幅相似候选图，需人工确认选图是否正确。")
-            # The ranked recommendation list is filtered and capped at three items.
-            # Only the unranked page layout can establish a single content picture.
-            # Obvious page ornaments use the exact same filter and tokens as ranking.
-            figure_page = None
-            if job and pdf_hash and isinstance(page, int) and page >= 1:
-                figure_page_id = "figpage-" + _sha(f"{pdf_hash}:{job.get('parser_version')}:{page}".encode())
-                figure_page = self.store.get("figure_pages", figure_page_id)
-            if (not figure_page or figure_page.get("pdf_hash") != pdf_hash
-                    or figure_page.get("parser_version") != job.get("parser_version")
-                    or figure_page.get("page") != page or figure_page.get("warning")
-                    or figure_page.get("regions_truncated") is not False
-                    or not isinstance(figure_page.get("regions"), list)):
-                reasons.append("原始图块记录缺失、截断或有疑点，需人工核对。")
-            else:
-                targets = _semantic_tokens(" ".join([card.get("question", ""), card.get("concept", "")]
-                                           + [entry.get("quote", "") for entry in card.get("evidence", [])]))
-                content_regions = _content_regions(figure_page["regions"], targets)
-                if (content_regions is None or len(content_regions) != 1
-                        or content_regions[0].get("kind") != "picture"):
-                    reasons.append("原页有多个正文图表区域或没有独立图块，需人工确认选图是否正确。")
-                elif not candidate or not _matches_original_region(candidate, content_regions[0]):
-                    reasons.append("候选图与原页独立图块的位置不一致，需重新匹配配图。")
+            elif job.get("pdf_hash") != pdf_hash:
+                reasons.append("原 PDF 已变化，请重新选择原图。")
+            if not candidate or candidate.get("page") != page:
+                reasons.append("原图页记录不可用，请重新选择原图。")
+            elif candidate.get("source_revision") != source.get("revision"):
+                reasons.append("原图与保存图片的讲义版本不一致。")
         bbox = source.get("bbox")
         if not page_mode and not _valid_bbox(bbox):
             reasons.append("裁剪范围无效，需人工核对。")
@@ -220,9 +157,7 @@ class ImageAutoReviewService:
                     "source_blocks": source_blocks,
                     "job": {key: job.get(key) for key in ("status", "parser_failed", "warning", "parser_version", "pdf_hash")}
                            if job else None,
-                    "candidate": candidate, "similar_picture_count": len([item for item in job.get("candidates", [])
-                        if item.get("page") == page and item.get("kind") == "picture"]) if job else None,
-                    "figure_page": figure_page,
+                    "candidate": candidate,
                     "model": self.settings.model, "endpoint_hash": _digest(self.settings.base_url),
                     "prompt_version": PROMPT_VERSION}
         identity["reasons"] = reasons
@@ -290,19 +225,8 @@ class ImageAutoReviewService:
         except (KeyError, ValueError, TypeError, ValidationError):
             return {"status": "needs_review", "reasons": ["模型检查结果无效，请人工核对或重试。"],
                     "visual": None, "retryable": True}
-        if (visual["classification"] == "diagram" and visual["relation"] == "supported"
-                and visual["completeness"] == "complete" and visual["legibility"] == "clear"
-                and (captured["side"] == "answer" or visual["answer_leakage"] == "no")):
-            status = "auto_pass"
-        elif (visual["relation"] == "unrelated" or visual["completeness"] == "incomplete"
-              or visual["legibility"] == "unclear"
-              or (captured["side"] == "question" and visual["answer_leakage"] == "yes")):
-            status = "attention"
-        else:
-            status = "needs_review"
+        status = {"pass": "auto_pass", "attention": "attention", "uncertain": "needs_review"}[verdict(visual, captured["side"])]
         reasons = visual["reasons"] or ["图片检查完成。"]
-        if status == "needs_review" and visual["classification"] != "diagram":
-            reasons = ["第一版仅允许独立示意图自动通过；其他图类需人工核对。", *reasons]
         return {"status": status, "reasons": reasons, "visual": visual, "retryable": False,
                 "diagnostics": safe_diagnostics(enriched.get("diagnostics"))}
 

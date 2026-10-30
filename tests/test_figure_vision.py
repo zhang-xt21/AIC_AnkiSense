@@ -2,11 +2,8 @@
 import copy
 import io
 import json
-import subprocess
-import types
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from threading import Event, Thread
 
 import pytest
@@ -31,11 +28,10 @@ def checked_context(context, monkeypatch):
         return {"result": copy.deepcopy(GOOD), "usage": {"total_tokens": 42}}
 
     monkeypatch.setattr(vision, "run_enrichment", fake)
-    monkeypatch.setattr(vision, "_python", lambda: Path(__file__))
     service = client.app.state.image_checks
     service.settings = Settings(mode="cloud", base_url="https://model.invalid/v1", model="fixture-vision", api_key="never-print-test-key")
     job = completed(client, card)
-    body = {"job_id": job["id"], "candidate_id": job["candidates"][0]["id"], "card_version": 1, "side": "answer"}
+    body = {"job_id": job["id"], "candidate_id": job["candidates"][0]["id"], "card_version": 1, "side": "answer", "bbox": [.1, .1, .6, .6]}
     yield client, card, body, service, calls
 
 
@@ -43,7 +39,7 @@ def check(c, card, body, **changes):
     return c.post(f"/api/cards/{card['id']}/image-recommendations/check", json={**body, **changes})
 
 
-def test_explicit_check_runs_docling_adapter_and_cache_never_mutates_cards(checked_context):
+def test_explicit_check_runs_direct_api_and_cache_never_mutates_cards(checked_context):
     c, card, body, service, calls = checked_context
     assert calls == []
     assert c.get("/api/image-check/status").json()["native_classifier"] is False
@@ -51,7 +47,7 @@ def test_explicit_check_runs_docling_adapter_and_cache_never_mutates_cards(check
     assert result.status_code == 200, result.text
     data = result.json()
     assert data["status"] == "checked" and data["verdict"] == "pass" and data["cached"] is False
-    assert data["classification"]["source"] == "docling-picture-description-api"
+    assert data["classification"]["source"] == "vision-api"
     assert "never-print" not in result.text
     assert len(calls) == 1
     assert calls[0]["crop"] != calls[0]["page"]
@@ -139,29 +135,6 @@ def test_corrupted_cached_result_is_rechecked(checked_context):
     assert len(calls) == 3
 
 
-@pytest.mark.parametrize("output", ["not JSON secret-provider-token", "[]", json.dumps({"result": {**GOOD, "relation": "probably"}})])
-def test_worker_invalid_output_never_exposes_raw_response(output, monkeypatch):
-    monkeypatch.setattr(vision, "_python", lambda: Path(__file__))
-    monkeypatch.setattr(vision.subprocess, "run", lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout=output))
-    with pytest.raises(vision.VisionError) as error:
-        vision.run_enrichment(Settings(mode="cloud", base_url="https://provider.invalid", model="fixture", api_key="private-key"), b"crop", b"page", "prompt")
-    assert "private" not in str(error.value) and "secret" not in str(error.value)
-
-
-def test_worker_timeout_uses_finite_deadline_and_stdin_credentials(monkeypatch):
-    monkeypatch.setattr(vision, "_python", lambda: Path(__file__))
-    settings = Settings(mode="cloud", base_url="https://provider.invalid", model="fixture", api_key="private-key", timeout_seconds=10)
-    def timeout(argv, **kwargs):
-        assert "private-key" not in str(argv)
-        assert json.loads(kwargs["input"])["api_key"] == "private-key"
-        assert 10 <= kwargs["timeout"] <= 55
-        assert kwargs["env"]["HF_HUB_OFFLINE"] == "1"
-        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-    monkeypatch.setattr(vision.subprocess, "run", timeout)
-    with pytest.raises(vision.VisionError, match="超时"):
-        vision.run_enrichment(settings, b"crop", b"page", "prompt")
-
-
 @pytest.mark.parametrize("url", ["http://cloud.invalid", "https://user:password@cloud.invalid", "https://cloud.invalid?key=secret", "file:///tmp/model"])
 def test_invalid_cloud_endpoint_rejected_without_model_call(url):
     assert vision.capability(Settings(mode="cloud", base_url=url, model="fixture", api_key="key"))["available"] is False
@@ -202,10 +175,8 @@ def test_duplicate_concurrent_check_reuses_one_request(checked_context, monkeypa
     assert len(calls) == 1
 
 
-def test_real_docling_stage_against_local_mock_only():
-    """Exercise the installed Docling stage and transport, without a cloud call."""
-    if not vision._python().is_file():
-        pytest.skip("Optional Docling environment is not installed")
+def test_direct_transport_against_local_mock_only():
+    """Exercise direct HTTP transport against a local test server."""
     requests = []
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -238,9 +209,7 @@ def test_real_docling_stage_against_local_mock_only():
 
 
 @pytest.mark.parametrize("status", [429, 302])
-def test_real_docling_transport_single_attempt_and_no_redirect(status):
-    if not vision._python().is_file():
-        pytest.skip("Optional Docling environment is not installed")
+def test_direct_transport_single_attempt_and_no_redirect(status):
     requests = []
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -284,7 +253,7 @@ def test_real_docling_transport_single_attempt_and_no_redirect(status):
     ("http://127.0.0.1:5000/chat/completions", "deepseek-flash", False),
 ])
 def test_thinking_extension_only_for_documented_official_deepseek(endpoint, model, disabled):
-    from tools.docling_enrichment_worker import generation_params
+    from ankisense.figure_vision import generation_params
     params = generation_params(endpoint, model)
     assert (params.get("thinking") == {"type": "disabled"}) is disabled
     assert params["max_tokens"] == 4096
@@ -304,9 +273,7 @@ def test_safe_diagnostics_drops_provider_strings_and_non_numeric_usage():
     ('{"classification": "diagram"', "", "stop", "invalid_json"),
     (json.dumps(GOOD), "", "content_filter", "generation_incomplete"),
 ])
-def test_real_worker_incomplete_response_diagnostics_only(content, reasoning, finish, error_code):
-    if not vision._python().is_file():
-        pytest.skip("Optional Docling environment is not installed")
+def test_direct_api_incomplete_response_diagnostics_only(content, reasoning, finish, error_code):
     calls = []
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -339,3 +306,41 @@ def test_real_worker_incomplete_response_diagnostics_only(content, reasoning, fi
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_configured_picture_capability_needs_no_extra_environment():
+    assert vision.capability(Settings(mode="cloud", base_url="https://model.invalid/v1", model="vision", api_key="fixture"))["available"] is True
+
+
+@pytest.mark.parametrize("failure,code", [("timeout", "timeout"), ("network", "network_error"), ("schema", "invalid_schema"), ("json", "invalid_schema")])
+def test_direct_transport_errors_are_safe_and_single_attempt(monkeypatch, failure, code):
+    import httpx
+    calls = []
+    client_class = httpx.Client
+    def handler(request):
+        calls.append(request)
+        assert request.headers["Authorization"] == "Bearer private-fixture-key"
+        if failure == "timeout":
+            raise httpx.ReadTimeout("private-provider-text", request=request)
+        if failure == "network":
+            raise httpx.ConnectError("private-provider-text", request=request)
+        if failure == "schema":
+            return httpx.Response(200, json={"choices": [{"message": {"content": "[]"}, "finish_reason": "stop"}]})
+        return httpx.Response(200, content=b"private-provider-text")
+    monkeypatch.setattr(vision.httpx, "Client", lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))
+    with pytest.raises(vision.VisionError) as error:
+        vision.run_enrichment(Settings(mode="cloud", base_url="https://model.invalid/v1", model="vision", api_key="private-fixture-key"), b"crop", b"page", "test")
+    assert len(calls) == 1 and error.value.diagnostics["error_code"] == code
+    assert "private" not in str(error.value) and "private" not in json.dumps(error.value.diagnostics)
+
+
+@pytest.mark.parametrize("kind", ["diagram", "table", "chart", "formula", "photo", "text"])
+@pytest.mark.parametrize("side,leak,expected", [("answer", "yes", "pass"), ("answer", "uncertain", "pass"),
+    ("question", "no", "pass"), ("question", "yes", "attention"), ("question", "uncertain", "uncertain")])
+def test_side_aware_policy_for_all_teaching_image_types(kind, side, leak, expected):
+    assert vision.verdict({**GOOD, "classification": kind, "answer_leakage": leak}, side) == expected
+
+
+def test_decoration_and_invalid_side_cannot_pass():
+    assert vision.verdict({**GOOD, "classification": "decoration"}, "answer") == "attention"
+    assert vision.verdict(GOOD, "invalid") == "uncertain"

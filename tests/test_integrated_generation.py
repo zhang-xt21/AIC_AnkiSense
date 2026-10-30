@@ -33,7 +33,7 @@ def test_real_adapter_isolates_invalid_knowledge_candidate(monkeypatch):
     result = asyncio.run(ai.generate_knowledge_cards_partial([block], points))
     assert [item.knowledge_id for item in result.cards] == ["k0"]
     assert [item["knowledge_id"] for item in result.rejected_cards] == ["k1"]
-    assert "校验" in result.rejected_cards[0]["reason"]
+    assert "连续原文" in result.rejected_cards[0]["reason"]
 
 
 def test_semantic_visual_batch_keeps_images_and_isolates_bad_review(monkeypatch):

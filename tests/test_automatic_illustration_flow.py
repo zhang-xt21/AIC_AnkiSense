@@ -1,4 +1,4 @@
-"""Full application generation -> prospective picture -> review -> APKG, offline."""
+"""Generation -> source page -> user crop -> review -> APKG, offline."""
 import copy
 import io
 import json
@@ -10,7 +10,7 @@ import pytest
 from ankisense.approval import valid_machine_approval
 from ankisense.llm import Settings
 from ankisense.schemas import CardDraft, PlannedDraftBatch
-from test_card_auto_review import bind_imported_pdf, good_review
+from test_card_auto_review import bind_imported_pdf, good_review, correct_reference_diagnosis, minimal_answer_fixture
 from test_figure_recommendations import context, save
 from test_image_auto_review import GOOD
 
@@ -23,16 +23,6 @@ def integrated(context, monkeypatch):
     app.state.store.put("cards", {**original, "status": "draft"})
     settings = Settings(mode="cloud", base_url="https://model.invalid", model="offline-fixture", api_key="test-only")
     app.state.settings = app.state.card_auto_review.settings = app.state.image_auto_review.settings = settings
-    extract = adapter.extract_regions
-
-    def layout(*args):
-        result = extract(*args)
-        for page in result["pages"]:
-            page["regions"] = [region for region in page["regions"] if region["kind"] == "picture"]
-            page["text_regions"] = []
-        return result
-
-    adapter.extract_regions = layout
     generated, reviewed, visual = [], [], []
     options = {"need": "required"}
 
@@ -52,6 +42,8 @@ def integrated(context, monkeypatch):
 
     monkeypatch.setattr(app.state.ai, "generate_drafts", generate)
     monkeypatch.setattr(app.state.ai, "review_card", review)
+    monkeypatch.setattr(app.state.ai, "diagnose_answer", correct_reference_diagnosis)
+    monkeypatch.setattr(app.state.ai, "minimal_answer_for_question", minimal_answer_fixture)
     monkeypatch.setattr("ankisense.image_auto_review.capability", lambda _: {"available": True})
     monkeypatch.setattr("ankisense.image_auto_review.run_enrichment", vision)
     return client, original, adapter, generated, reviewed, visual, options
@@ -70,6 +62,8 @@ def run_job(fixture, *, enabled=True):
         cards = [item for item in state["cards"] if item.get("generation_job_id") == response.json()["id"]]
         if cards:
             card = cards[0]
+            if (card.get("auto_illustration") or {}).get("state") == "needs_review":
+                return card
             if ((card.get("auto_illustration") or {}).get("state") in {"attached", "skipped"}
                     and card.get("review_state") in {"auto_pass", "needs_review"}):
                 return card
@@ -82,10 +76,25 @@ def test_generated_card_gets_verified_picture_and_exports_with_media(integrated,
     client, original, adapter, generated, reviewed, visual, options = integrated
     options["need"] = need
     card = run_job(integrated)
+    assert card["auto_illustration"]["state"] == "needs_review" and not card.get("images")
+    job = client.get(f"/api/image-recommendations/{card['auto_illustration']['job_id']}").json()
+    adopted = client.post(f"/api/cards/{card['id']}/image-recommendations/adopt", json={
+        "job_id":job["id"],"candidate_id":job["candidates"][0]["id"],"card_version":card["version"],
+        "bbox":[.1,.1,.6,.6]})
+    assert adopted.status_code == 200, adopted.text
+    updated = save(client,card,status="draft",expected_version=card["version"],
+                   images=[{"media_id":adopted.json()["id"],"side":side,"caption":"User-selected lecture region"}])
+    assert updated.status_code == 200, updated.text
+    deadline = time.monotonic()+5
+    while time.monotonic() < deadline:
+        card = client.app.state.store.get("cards",card["id"])
+        if card["status"] == "approved" and card["version"] == 2:
+            break
+        time.sleep(.01)
     assert card["status"] == "approved" and card["version"] == 2
     assert valid_machine_approval(client.app.state.store, card)
     assert card["images"][0]["side"] == side
-    assert len(generated) == len(visual) == 1 and adapter.calls == [[2]]
+    assert len(generated) == len(visual) == 1 and adapter.calls == [2]
     final_review = next(item for item in reviewed if item.get("verified_images"))
     assert final_review["verified_images"] == [{"side": side, "page": 2, "description": GOOD["description"]}]
     if need == "required":

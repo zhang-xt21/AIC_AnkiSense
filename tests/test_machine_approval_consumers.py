@@ -9,7 +9,7 @@ from ankisense.llm import Settings
 from ankisense.plugin_sync import PluginSync
 from ankisense.schemas import Diagnosis
 from ankisense.sources import save_page_revision
-from test_card_auto_review import bind_imported_pdf, good_review, post, ready
+from test_card_auto_review import bind_imported_pdf, good_review, post, ready, minimal_answer_fixture
 from test_figure_recommendations import context, save
 from test_image_auto_review import saved
 
@@ -28,6 +28,7 @@ def local_diagnosis(context, monkeypatch):
                          source_block_ids=[blocks[0].block_id], reason="离线测试回答与引用一致。")
 
     monkeypatch.setattr(client.app.state.ai, "diagnose_answer", diagnose)
+    monkeypatch.setattr(client.app.state.ai, "minimal_answer_for_question", minimal_answer_fixture)
 
 
 def pending(store, card):

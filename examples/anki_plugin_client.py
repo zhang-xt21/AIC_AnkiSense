@@ -132,8 +132,9 @@ class PluginClient:
             raise PluginError(None, "different_server", "The connected AnkiSense data directory has changed. Reconnect before syncing.")
         return result
 
-    def catalog(self):
-        result = self._request("/cards")
+    def catalog(self, document_id=None):
+        suffix = "?" + urlencode({"document_id": document_id}) if document_id else ""
+        result = self._request("/cards" + suffix)
         if type(result.get("protocol_version")) is not int or result["protocol_version"] != 1 or result.get("complete") is not True or not isinstance(result.get("cards"), list):
             raise PluginError(None, "incomplete_catalog", "No complete sync manifest was received; keep existing Anki notes unchanged.")
         if self.server_id is not None and result.get("server_id") != self.server_id:
@@ -170,7 +171,7 @@ class PluginClient:
     def attempt(self, attempt_id):
         return self._request("/attempts/" + _identifier(attempt_id))
 
-    def connection_event(self, kind, result=None, *, plugin_version="0.2.0"):
+    def connection_event(self, kind, result=None, *, plugin_version="0.3.2"):
         if kind not in {"heartbeat", "sync"}:
             raise ValueError("Invalid connection event")
         result = result or {}

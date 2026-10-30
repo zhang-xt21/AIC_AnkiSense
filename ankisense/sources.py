@@ -8,6 +8,7 @@ from .ingest import text_blocks
 from .source_policy import source_usable, machine_verified
 from .automatic_policy import automatic_evidence_valid
 from .source_quality import assess_page
+from .quote_recovery import valid_supplement
 
 
 def page_id(document_id, page):
@@ -66,7 +67,7 @@ def require_current_source(store, blocks):
         record = store.get("source_pages", page_id(block.document_id, block.page))
         if record is None:  # Existing text, demo and legacy PDF sources remain usable.
             continue
-        if block.block_id not in record["block_ids"]:
+        if block.block_id not in record["block_ids"] and not valid_supplement(store, block, record):
             raise HTTPException(409, "原文已更新；请使用当前版本重新生成卡片，或更新原文引用后再审核。")
         if not source_available(record) or not record.get("text", "").strip():
             raise HTTPException(409, f"第 {block.page} 页未成功提取文字，请重新识别或补充原文后制卡。")
@@ -83,7 +84,7 @@ def require_current_reviewed(store, blocks, card=None):
             continue
         if not source_usable(record) and not (automatic and source_available(record)):
             raise HTTPException(409, f"请先对照原图校对并确认第 {block.page} 页文字。")
-        if block.block_id not in record["block_ids"]:
+        if block.block_id not in record["block_ids"] and not valid_supplement(store, block, record):
             raise HTTPException(409, "原文已更新；请使用当前已校对版本重新生成卡片，或更新原文引用后再审核。")
 
 
@@ -113,6 +114,8 @@ def save_page_revision(store, document_id, page, expected, replacement, action, 
             raise HTTPException(422, f"原文过长；单页最多 5 万字，所选材料合计最多 {total_limit // 10000} 万字。")
         records = page_records(document_id, updated, old["revision"] + 1, action)
         old_ids = set(old["block_ids"])
+        old_ids.update(proof["id"] for proof in store.all("quote_recoveries")
+                       if proof.get("parent_id") in old_ids)
         for card in store.all("cards"):
             if old_ids.intersection(entry["block_id"] for entry in card["evidence"]):
                 invalidated = invalidate_approval({**card, "status": "draft", "source_outdated": True,

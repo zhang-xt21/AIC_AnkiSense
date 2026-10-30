@@ -67,7 +67,13 @@ def offline_service(monkeypatch, card, blocks, answer, response):
             + DIAGNOSE_INSTRUCTIONS
         )
         cited_ids = {evidence.block_id for evidence in card.evidence}
-        assert json.loads(messages[1]["content"]) == {
+        data = json.loads(messages[1]["content"])
+        feedback = data.pop("retry_feedback", None)
+        if len(calls) > 1:
+            assert feedback and feedback["validation_errors"]
+        else:
+            assert feedback is None
+        assert data == {
             "card": card.model_dump(),
             "source_blocks": [
                 block.model_dump() for block in blocks if block.block_id in cited_ids
@@ -162,7 +168,7 @@ def test_offline_contradiction_cannot_keep_a_nonincorrect_verdict(monkeypatch, l
     service, calls = offline_service(monkeypatch, card, blocks, answer, invalid)
     with pytest.raises(AIError, match="校验"):
         asyncio.run(service.diagnose_answer(card, blocks, answer))
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_offline_injection_stays_in_json_data_and_cannot_replace_system_rules(monkeypatch, lesson):

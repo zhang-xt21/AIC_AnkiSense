@@ -1,0 +1,110 @@
+{
+  "version": "0.1.19",
+  "verification_date": "2026-10-29",
+  "environment": "Windows development machine; isolated application data",
+  "scope": "Historical local verification, not a rerun on the final submission commit",
+  "checks": {
+    "packaged": 20,
+    "backend_deletion_and_health": 8,
+    "desktop_unit": 8,
+    "frontend": 77,
+    "browser": 13
+  },
+  "packaged_program_checks": [
+    {
+      "name": "Actual backend identifies itself and demo data is isolated",
+      "status": "passed"
+    },
+    {
+      "name": "Native title controls and renderer isolation",
+      "status": "passed"
+    },
+    {
+      "name": "Actual static assets and settings render inside Electron",
+      "status": "passed"
+    },
+    {
+      "name": "Crop cancel closes immediately without adopting or changing the draft",
+      "status": "passed"
+    },
+    {
+      "name": "Escape dismisses the crop and reopening restores its initial selection",
+      "status": "passed"
+    },
+    {
+      "name": "Cancel works even when the original page image fails to load",
+      "status": "passed"
+    },
+    {
+      "name": "Picture checks are explicit, retryable and bound to the selected display side",
+      "status": "passed"
+    },
+    {
+      "name": "Explicit adoption submits exactly one crop and preserves the source card",
+      "status": "passed"
+    },
+    {
+      "name": "Bundled setup pairs an isolated add-on or blocks updates while Anki is running",
+      "status": "passed"
+    },
+    {
+      "name": "Packaged backend serves APKG and media ZIP for a selected document",
+      "status": "passed"
+    },
+    {
+      "name": "The native APKG download button writes a complete file into an isolated destination",
+      "status": "passed"
+    },
+    {
+      "name": "Viewing saved cards from a cancelled task refreshes and focuses the packaged result list",
+      "status": "passed"
+    },
+    {
+      "name": "Packaged card and practice filters preserve the answer draft and selected lecture",
+      "status": "passed"
+    },
+    {
+      "name": "A second desktop instance exits without opening another window",
+      "status": "passed"
+    },
+    {
+      "name": "Frozen PDF renderer and bundled OCR work without downloading models",
+      "status": "passed"
+    },
+    {
+      "name": "Packaged original-page crops reach a local vision API without an extra interpreter",
+      "status": "passed"
+    },
+    {
+      "name": "Native workbench practice follows the selected lecture and blocks unsaved edits",
+      "status": "passed"
+    },
+    {
+      "name": "Packaged math preview uses local fonts and preserves LaTeX editor source",
+      "status": "passed"
+    },
+    {
+      "name": "Packaged deletion supports cancel, single removal and scoped clearing",
+      "status": "passed"
+    },
+    {
+      "name": "Only the spawned backend closes with the native shell",
+      "status": "passed"
+    }
+  ],
+  "errors": [],
+  "screenshot_warning_count": 1,
+  "installer_executed": false,
+  "real_model_requests": 0,
+  "personal_data_modified": false,
+  "installer": {
+    "filename": "AnkiSense Setup 0.1.19.exe",
+    "bytes": 217362831,
+    "sha256": "FBF859D29F0BEE35EC006CE7F092A177A022E333DA53AF7CC60F53899C6BCC79"
+  },
+  "limitations": [
+    "NSIS installer not executed in a clean Windows environment",
+    "No overall AI accuracy or learning outcome estimate",
+    "Final submission commit must be revalidated"
+  ]
+}

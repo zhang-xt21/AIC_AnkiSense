@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.evaluate_image_approval import DatasetError, evaluate, load_cases, main, release_gate
+from tools.evaluation.evaluate_image_approval import DatasetError, evaluate, load_cases, main, release_gate
 
 
 ROOT = Path(__file__).resolve().parents[1]

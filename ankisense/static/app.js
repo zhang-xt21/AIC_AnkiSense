@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (selector, root = document) => root.querySelector(selector);
-const app = { data: null, view: "materials", showImport: false, proofOpen: {}, uploadTab: "pdf", documentId: null, cardId: null, cardDrafts: {}, cardEditBusy: null, cardEditErrors: {}, practiceId: null, practiceFilter: "all", practiceLoadedKey: null, practiceDrafts: {}, selectedBlocks: new Set(), reviewFilter: "all", attempt: null, answer: "", busy: false, sourcePage: {}, proofDrafts: {}, proofBusy: null, proofErrors: {}, aiProofBusy: null, aiProofErrors: {}, aiProofBatch: null };
+const app = { data: null, view: "materials", showImport: false, proofOpen: {}, uploadTab: "pdf", documentId: null, cardId: null, cardDrafts: {}, cardEditBusy: null, cardEditErrors: {}, practiceId: null, practiceFilter: "all", practiceDocument: "all", practiceQuery: "", practiceImages: "all", practiceLoadedKey: null, practiceDrafts: {}, selectedBlocks: new Set(), reviewFilter: "all", attempt: null, answer: "", busy: false, sourcePage: {}, proofDrafts: {}, proofBusy: null, proofErrors: {}, aiProofBusy: null, aiProofErrors: {}, aiProofBatch: null };
 const viewNames = { materials: "学习材料", cards: "卡牌结果", review: "制卡工作台", practice: "开始练习", export: "导出至 Anki", settings: "模型设置" };
 const verdictNames = { correct: "回答正确", incomplete: "还不完整", incorrect: "需要修正", uncertain: "暂时无法判断" };
 const verdictColors = { correct: "green", incomplete: "amber", incorrect: "red", uncertain: "blue" };
@@ -14,7 +14,7 @@ function cardStatusLabel(card) {
   if (card.review_state === "running") return "正在自动检查";
   return statusNames[card.status] || "待处理";
 }
-const automaticReviewNotice = "生成或保存后会自动检查，将相关文字、必要配图及其原页发送至当前配置的模型 API，会消耗 API 额度。检查通过即可学习；有疑点或检查失败时保留草稿供你处理。";
+const automaticReviewNotice = "自动检查会向已配置模型发送相关文字、必要配图与原页，并消耗 API 额度。";
 function sourcePageStatus(page) { return page.status === "empty" && !page.reviewed_at ? "未识别到文字" : pageStatusNames[page.status] || page.status; }
 function sourcePageConfirmed(page) { return page.status === "reviewed" || (page.status === "empty" && Boolean(page.reviewed_at)); }
 const proofStorageKey = "ankisense-proofreading-drafts-v1";
@@ -46,7 +46,10 @@ function updateReviewIndicators() {
   const status = $("#workbench-card-status");
   if (current && status) status.textContent = `${app.cardDrafts[current.id]?.dirty ? "已保存版本 " : "版本 "}${current.version || 1} · ${cardStatusLabel(current)}${app.cardDrafts[current.id]?.dirty ? " · 当前修改未检查" : ""}`;
   for (const options of document.querySelectorAll("[data-manual-review]")) options.hidden = current?.status === "approved" || ["queued", "running"].includes(current?.review_state);
-  for (const action of document.querySelectorAll("[data-start-practice]")) action.disabled = !app.data.cards.some(card => card.status === "approved");
+  for (const action of document.querySelectorAll("[data-start-practice]")) {
+    action.disabled = !reviewPracticeCard();
+    action.title = app.cardDrafts[app.cardId]?.dirty ? "请先保存当前修改，再开始练习。" : "";
+  }
   const count = $("#studio-review-count");
   if (count) {
     const cards = app.data.cards.filter(card => !app.reviewDocument || app.reviewDocument === "all" || card.document_id === app.reviewDocument);
@@ -120,7 +123,10 @@ function el(tag, attributes = {}, ...children) {
   }
   return node;
 }
-const text = (tag, value, className) => el(tag, { text: value, class: className });
+const text = (tag, value, className) => {
+  const node = el(tag, { text: value, class: className });
+  return window.MathText && ["p", "h1", "h2", "h3", "blockquote", "li"].includes(tag) ? MathText.set(node, value) : node;
+};
 const button = (label, action, className = "btn", disabled = false) => el("button", { type: "button", class: className, disabled, on: { click: action } }, label);
 const badge = (label, color = "") => text("span", label, `pill ${color}`);
 const note = (message, kind = "") => text("div", message, `notice ${kind}`);
@@ -134,7 +140,10 @@ function empty(title, description, action, symbol = "▱") {
   return el("div", { class: "empty-state" }, text("span", symbol, "empty-symbol"), text("h2", title), text("p", description), action);
 }
 function heading(eyebrow, title, description, actions) {
-  return el("div", { class: "page-heading" }, el("div", {}, text("span", eyebrow, "eyebrow page-kicker"), text("h1", title), text("p", description, "lead")), actions ? el("div", { class: "page-actions" }, actions) : null);
+  return el("div", { class: "page-heading" }, el("div", {}, eyebrow ? text("span", eyebrow, "eyebrow page-kicker") : null, text("h1", title), description ? text("p", description, "lead") : null), actions ? el("div", { class: "page-actions" }, actions) : null);
+}
+function helpDetails(label, ...content) {
+  return el("details", { class: "help-details" }, text("summary", label), ...content);
 }
 function toast(message, error = false) {
   clearTimeout(toastTimer);
@@ -157,12 +166,73 @@ async function api(path, options = {}) {
   return data;
 }
 function jsonOptions(method, body) { return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }; }
-async function refresh() {
-  app.data = withoutDemoRecords(await api("/api/state"));
+function confirmCardDeletion({ card = null, documentId = null }) {
+  if (document.querySelector(".delete-cards-dialog")) return;
+  const selected = card ? [card] : app.data.cards.filter(item => item.document_id === documentId);
+  if (!selected.length && (card || !documentFor(documentId))) return;
+  const opener = document.activeElement;
+  const dialog = el("dialog", { class: "card-image-dialog delete-cards-dialog", "aria-labelledby": "delete-cards-title" });
+  const error = el("p", { class: "inline-error", role: "alert" });
+  let deleting = false;
+  const cancel = button("取消", () => dialog.close(), "btn secondary");
+  const confirm = button("确认删除", async () => {
+    if (deleting) return;
+    deleting = true; confirm.disabled = true; cancel.disabled = true; confirm.textContent = "正在删除…"; error.textContent = "";
+    try {
+      const result = await api(card ? `/api/cards/${encodeURIComponent(card.id)}` : `/api/documents/${encodeURIComponent(documentId)}?expected_count=${selected.length}`, { method: "DELETE" });
+      const ids = new Set(result.deleted_ids);
+      for (const item of selected) if (ids.has(item.id)) {
+        delete app.cardDrafts[item.id]; delete app.cardEditErrors[item.id];
+        app.automaticAnswers?.delete(item.id);
+        for (const key of Object.keys(app.practiceDrafts)) {
+          try { if (JSON.parse(key)[0] === item.id) delete app.practiceDrafts[key]; } catch { /* Ignore unrelated legacy keys. */ }
+        }
+      }
+      if (ids.has(app.cardId)) app.cardId = null;
+      if (ids.has(app.practiceId)) { app.practiceId = null; app.attempt = null; app.answer = ""; app.practiceLoadedKey = null; }
+      persistPracticeDrafts();
+      dialog.close();
+      app.data.cards = app.data.cards.filter(item => !ids.has(item.id));
+      app.data.attempts = app.data.attempts.filter(item => !ids.has(item.card_id));
+      if (result.deleted_document_id) {
+        const removed = result.deleted_document_id;
+        for (const name of ["documents", "blocks", "source_pages", "source_proposals", "generation_jobs"]) {
+          app.data[name] = (app.data[name] || []).filter(item => name === "documents" ? item.id !== removed : item.document_id !== removed);
+        }
+        app.materialImports = app.materialImports.filter(item => item.document_id !== removed);
+        app.materialImportId = null;
+        if (app.documentId === removed) app.documentId = app.data.documents[0]?.id || null;
+        if (app.reviewDocument === removed) app.reviewDocument = "all";
+        if (app.practiceDocument === removed) app.practiceDocument = "all";
+        for (const key of Object.keys(app.proofDrafts)) if (key.startsWith(`${removed}:`)) delete app.proofDrafts[key];
+        keepProofDrafts();
+        history.replaceState(null, "", location.pathname);
+      }
+      render();
+      try { await refresh(); await loadMaterialImports(); toast(result.deleted_document_id ? `已删除材料及 ${result.deleted_count} 张卡片。` : `已删除 ${result.deleted_count} 张卡片。`); }
+      catch { toast("删除已完成，列表刷新失败，请重新打开页面。", true); }
+    } catch (failure) {
+      error.textContent = failure.message; deleting = false; confirm.disabled = false; cancel.disabled = false; confirm.textContent = "重试删除";
+    }
+  }, "btn danger");
+  dialog.append(el("h2", { id: "delete-cards-title" }, card ? "删除这张卡片？" : "删除本材料及卡片？"),
+    text("p", card ? card.question : documentFor(documentId)?.title || "当前学习材料"),
+    text("p", card ? "将删除卡片及其本地练习记录，无法撤销。讲义保留；已同步到 Anki 的副本不会删除。" :
+      `将移除本材料、${selected.length} 张卡片、本地练习与处理记录，无法撤销。已同步到 Anki 的副本不会删除。`, "helper"), error,
+    el("div", { class: "two-buttons" }, cancel, confirm));
+  dialog.addEventListener("cancel", event => { if (deleting) event.preventDefault(); });
+  dialog.addEventListener("close", () => { dialog.remove(); if (opener?.isConnected) opener.focus(); });
+  document.body.append(dialog); dialog.showModal(); cancel.focus();
+}
+function applyState(snapshot) {
+  app.data = withoutDemoRecords(snapshot);
   for (const key of ["documents", "blocks", "cards", "attempts", "source_pages", "source_proposals", "media", "generation_jobs"]) app.data[key] ||= [];
   if (!app.data.documents.some(item => item.id === app.documentId)) app.documentId = app.data.documents[0]?.id || null;
   const eligibleIds = new Set(app.data.documents.flatMap(doc => blocksFor(doc.id).filter(blockCanGenerate).map(block => block.block_id)));
   for (const id of app.selectedBlocks) if (!eligibleIds.has(id)) app.selectedBlocks.delete(id);
+}
+async function refresh() {
+  applyState(await api("/api/state"));
   render();
   scheduleReviewPoll();
 }
@@ -291,6 +361,13 @@ function demoButton(className = "btn secondary") {
 
 function render() {
   if (!app.data) return;
+  const focused = document.activeElement;
+  const filtering = focused?.dataset.filterSearch;
+  if (filtering && focused.dataset.composing === "true" && focused.closest("main")?.dataset.view === app.view) {
+    app.filterRenderPending = true; return;
+  }
+  app.filterRenderPending = false;
+  const selection = filtering ? [focused.selectionStart, focused.selectionEnd] : null;
   app.data = withoutDemoRecords(app.data);
   for (const nav of document.querySelectorAll("[data-view]")) {
     const active = nav.dataset.view === app.view;
@@ -309,6 +386,11 @@ function render() {
   }
   main.dataset.view = app.view;
   main.replaceChildren(({ materials: renderMaterials, cards: renderCards, review: renderReview, practice: renderPractice, export: renderExport, settings: renderModelSettings })[app.view]());
+  if (filtering) {
+    const input = main.querySelector(`[data-filter-search="${filtering}"]`);
+    input?.focus({ preventScroll: true });
+    if (input && selection) input.setSelectionRange(...selection);
+  }
   if (manualOpen && main.querySelector("#manual-tools")) main.querySelector("#manual-tools").open = true;
   if (main.querySelector(".workbench-grid")?.dataset.cardId === oldGrid?.dataset.cardId) {
     for (const [name, position] of scrollPositions) {
@@ -329,11 +411,11 @@ function renderModelSettings() {
 }
 
 function renderMaterials() {
-  const page = el("div", {}, heading("学习材料", "从一份讲义，开始理解", "把课程中的关键知识，整理成有依据、可练习的学习卡片。", [demoButton(), button("查看卡片  →", () => setView("cards"))]));
+  const page = el("div", {}, heading(null, "学习材料", null, [demoButton(), button("查看卡片  →", () => setView("cards"))]));
   page.append(renderAutomaticImport());
   if (app.data.documents.length) page.append(el("div", { class: "workspace-summary", "aria-label": "学习空间概览" }, ...[
     [app.data.documents.length, "份学习材料"],
-    [app.data.cards.filter(card => card.status === "draft").length, "张卡片附有疑点"],
+    [app.data.cards.filter(card => card.status === "draft").length, "张待检查或处理"],
     [app.data.cards.filter(card => card.status === "approved").length, "张卡片可练习"]
   ].map(([count, label]) => el("div", { class: "summary-item" }, text("strong", String(count).padStart(2, "0")), text("span", label)))));
   const currentDocument = documentFor(app.documentId);
@@ -669,8 +751,8 @@ function renderSourcePanel() {
 
 function renderReview() {
   const all = app.data.cards;
-  const approved = all.filter(c => c.status === "approved").length;
-  const page = el("div", { class: "card-workspace studio-audit-stage" }, heading("制卡工作台", "核对讲义，编辑并检查卡片", "左侧查看依据，中间编辑内容，右侧预览正反面。保存后自动检查，通过即可学习。", [button("返回卡牌结果", () => setView("cards"), "btn secondary small"), button("开始练习 →", () => setView("practice"), "btn small", !approved)]));
+  const start = button("开始练习 →", () => startPracticeCard(reviewPracticeCard()), "btn small", true);
+  const page = el("div", { class: "card-workspace studio-audit-stage" }, heading(null, "制卡工作台", null, [button("返回卡牌结果", () => setView("cards"), "btn secondary small"), start]));
   page.querySelectorAll(".page-actions button").forEach(action => { if (action.textContent.includes("开始练习")) action.dataset.startPractice = "true"; });
   page.append(text("p", "", "helper studio-review-count"));
   page.lastChild.id = "studio-review-count";
@@ -684,6 +766,7 @@ function renderReview() {
   const card = cards.find(c => c.id === app.cardId) || cards[0];
   app.cardId = card?.id || null;
   if (card) app.documentId = card.document_id;
+  start.disabled = !reviewPracticeCard();
   const selector = el("select", { "aria-label": "选择编辑卡片", disabled: !cards.length }, ...cards.map((c, i) => el("option", { value: c.id, selected: c.id === card?.id }, `${i + 1}. ${app.cardDrafts[c.id]?.dirty ? "[未保存] " : ""}${c.question}`)));
   selector.addEventListener("change", () => { app.cardId = selector.value; render(); });
   const index = cards.indexOf(card);
@@ -744,11 +827,11 @@ function renderCardImageEditor(card, draft) {
       addMedia(await api("/api/card-media", { method: "POST", body }));
     });
   });
-  section.append(el("div", { class: "card-image-heading" }, text("h3", "讲义配图"), badge(`${draft.images.length} / 4 张`)), text("p", "先从引用页推荐配图，也可上传截图。保存后可让模型自动筛查已采纳的讲义配图；题目侧图片请留意是否提前暴露答案。", "helper"));
+  section.append(el("div", { class: "card-image-heading" }, text("h3", "讲义配图"), badge(`${draft.images.length} / 4 张`)));
   section.append(AutoIllustration.create({ card, draft, onReload: () => reloadSavedCard(card, draft) }));
   if (pages.length) section.append(FigureRecommendations.create({ card, draft, api, busy, media: app.data.media, vision: app.data.image_check,
     run: callback => cardEditOperation(card, "upload", callback), onAdopt: addMedia }));
-  const controls = el("div", { class: "card-image-controls" }, field("上传截图", upload, "PNG / JPEG / WebP，每张最多 5 MiB；上传时保存到本机，主动使用云端检查时才发送图片。"));
+  const controls = el("div", { class: "card-image-controls" }, field("上传图片", upload, "PNG / JPEG / WebP · 最多 5 MiB"));
   if (pages.length) {
     const selectedPage = pages.find(page => page.page === draft.imagePage) || pages[0];
     const pageSelector = el("select", { disabled: busy || full, "aria-label": "选择本材料 PDF 原图页" }, ...pages.map(page => el("option", { value: String(page.page), selected: page.page === selectedPage.page }, `PDF 第 ${page.page} 页 · 修订 ${page.revision}`)));
@@ -759,7 +842,7 @@ function renderCardImageEditor(card, draft) {
       if (!source) return;
       cardEditOperation(card, "upload", async () => addMedia(await api("/api/card-media/from-page", jsonOptions("POST", { document_id: card.document_id, page: source.page, revision: source.revision }))));
     }, "btn secondary small", busy || full);
-    controls.append(field("从本材料附加原图", pageSelector), addPage);
+    controls.append(helpDetails("其他页面", field("选择讲义页", pageSelector), addPage));
   } else controls.append(text("p", "此材料暂无 PDF 页面原图，可上传讲义截图。", "helper"));
   section.append(controls);
   if (app.cardEditBusy?.cardId === card.id && app.cardEditBusy.operation === "upload") section.append(text("p", "正在准备配图，请稍候…", "helper"));
@@ -789,8 +872,8 @@ function renderCardImageEditor(card, draft) {
       toast(`配图检查完成 ${completed} 张${failed ? `，${failed} 张未完成，请单独重试` : ""}。结果只用于配图筛查。`, Boolean(failed));
     });
   }, "btn secondary small", busy || !app.data.image_check?.available));
-  section.append(list, text("p", "上传只是准备配图。点击「保存并检查」后，当前文字、配图位置与说明会一起保存。", "helper card-image-save-note"));
-  if (draft.images.length) section.append(text("p", "保存后会依次检查配图和卡片内容，全部通过即可学习。答题诊断仍依据文字和评分要点；请把解题所需的图中条件写入问题。", "notice card-image-ai-note"));
+  section.append(list, helpDetails("配图说明", text("p", "配图需点击「保存并检查」才会随卡片保存；题目侧图片应避免提前暴露答案。", "helper card-image-save-note")));
+  if (draft.images.length) section.append(text("p", "答题分析依据文字，请将图中必要条件写入问题。", "helper card-image-ai-note"));
   return section;
 }
 function reloadSavedCard(card, draft) {
@@ -884,7 +967,7 @@ function renderCardEditor(card) {
         toast(result.status === "auto_pass" && result.current === true
           ? "机器审核通过，可以开始学习。" : ["queued", "running"].includes(result.status) ? "已开始自动检查。" : "检查结果已保存。有疑点的卡片仍保留为草稿，可修改后再试。");
       },
-      onStudy: () => { app.practiceId = card.id; app.practiceFilter = "all"; setView("practice"); },
+      onStudy: () => startPracticeCard(card),
       onLocate: blockId => {
         const block = app.data.blocks.find(item => item.block_id === blockId && item.document_id === card.document_id);
         if (!block) return toast("这段原文已不可用，请重新打开讲义核对。", true);
@@ -938,10 +1021,68 @@ function focusPracticeQuestion() {
   const bounds = target.getBoundingClientRect();
   if (bounds.top < 0 || bounds.bottom > window.innerHeight) target.scrollIntoView({ block: "start", behavior: "instant" });
 }
+function reviewPracticeCard() {
+  const current = app.data.cards.find(card => card.id === app.cardId);
+  if (current && app.cardDrafts[current.id]?.dirty) return null;
+  if (current?.status === "approved" && !current.source_outdated) return current;
+  const documentId = current?.document_id || (app.reviewDocument && app.reviewDocument !== "all" ? app.reviewDocument : app.documentId);
+  return app.data.cards.find(card => card.document_id === documentId && card.status === "approved" && !card.source_outdated);
+}
+function startPracticeCard(card) {
+  const current = card && app.data.cards.find(item => item.id === card.id && item.status === "approved" && !item.source_outdated);
+  if (!current) return;
+  app.practiceDocument = current.document_id; app.practiceQuery = ""; app.practiceImages = "all"; app.practiceFilter = "all";
+  loadPractice(current.id); setView("practice");
+}
+function practiceScope() {
+  return CardFilters.filter(app.data.cards.filter(card => card.status === "approved" && !card.source_outdated),
+    { documentId: app.practiceDocument, query: app.practiceQuery, images: app.practiceImages });
+}
+function practiceRecordMatches(attempt) {
+  const current = app.data.cards.find(card => card.id === attempt.card_id);
+  const snapshot = { ...current, ...attempt.card_snapshot };
+  return CardFilters.matches(snapshot, { documentId: app.practiceDocument, query: app.practiceQuery, images: app.practiceImages });
+}
+function renderPractice() {
+  const page = el("div", {}, heading(null, "开始练习", null));
+  const documents = el("select", { "aria-label": "选择练习讲义", disabled: app.busy },
+    el("option", { value: "all", selected: app.practiceDocument === "all" }, "全部讲义"),
+    ...app.data.documents.map(doc => el("option", { value: doc.id, selected: doc.id === app.practiceDocument }, doc.title)));
+  const search = el("input", { type: "search", value: app.practiceQuery, placeholder: "搜索题目或知识点", "aria-label": "搜索练习卡片", "data-filter-search": "practice", disabled: app.busy });
+  const images = el("select", { "aria-label": "筛选练习配图", disabled: app.busy }, ...[["all", "不限配图"], ["with", "有配图"], ["without", "无配图"]].map(([value, label]) => el("option", { value, selected: app.practiceImages === value }, label)));
+  const content = el("div", { id: "practice-content" });
+  const clear = button("清除筛选", () => {
+    app.practiceDocument = "all"; app.practiceQuery = ""; app.practiceImages = "all"; app.practiceFilter = "all";
+    documents.value = "all"; search.value = ""; images.value = "all"; update(); search.focus();
+  }, "btn quiet small", app.busy);
+  function update() {
+    const scoped = practiceScope();
+    const filtered = PracticeProgress.filterCards(scoped, PracticeProgress.getProgress(scoped, app.data.attempts), app.practiceFilter);
+    if (!filtered.some(card => card.id === app.practiceId)) loadPractice(filtered[0]?.id || null);
+    clear.disabled = app.busy || (app.practiceDocument === "all" && !app.practiceQuery && app.practiceImages === "all" && app.practiceFilter === "all");
+    content.replaceChildren(renderPracticeContent());
+  }
+  documents.addEventListener("change", () => { app.practiceDocument = documents.value; update(); });
+  images.addEventListener("change", () => { app.practiceImages = images.value; update(); });
+  let composing = false;
+  search.addEventListener("compositionstart", () => { composing = true; search.dataset.composing = "true"; });
+  search.addEventListener("compositionend", () => { composing = false; search.dataset.composing = "false"; app.practiceQuery = search.value; update(); if (app.filterRenderPending) { app.filterRenderPending = false; render(); } });
+  search.addEventListener("input", () => { app.practiceQuery = search.value; if (!composing) update(); });
+  page.append(el("section", { class: "card-filter-toolbar practice-scope-toolbar", "aria-label": "筛选练习卡片" },
+    field("学习材料", documents), field("搜索", search), field("配图", images), clear), content);
+  clear.disabled = app.busy || (app.practiceDocument === "all" && !app.practiceQuery && app.practiceImages === "all" && app.practiceFilter === "all");
+  content.append(renderPracticeContent());
+  return page;
+}
 function selectPractice(id, attempt = null) {
   if (app.busy) return;
+  const target = attempt?.card_snapshot || app.data.cards.find(card => card.id === id);
+  if (target) {
+    if (app.practiceDocument !== "all" && target.document_id && target.document_id !== app.practiceDocument) app.practiceDocument = target.document_id;
+    if (!CardFilters.matches(target, { query: app.practiceQuery, images: app.practiceImages })) { app.practiceQuery = ""; app.practiceImages = "all"; }
+  }
   if (!attempt) {
-    const approved = app.data.cards.filter(card => card.status === "approved");
+    const approved = practiceScope();
     if (!PracticeProgress.filterCards(approved, PracticeProgress.getProgress(approved, app.data.attempts), app.practiceFilter).some(card => card.id === id)) app.practiceFilter = "all";
   }
   loadPractice(id, attempt);
@@ -952,7 +1093,7 @@ function selectPractice(id, attempt = null) {
 function changePracticeFilter(filter) {
   if (app.busy) return;
   app.practiceFilter = filter;
-  const approved = app.data.cards.filter(card => card.status === "approved");
+  const approved = practiceScope();
   const cards = PracticeProgress.filterCards(approved, PracticeProgress.getProgress(approved, app.data.attempts), filter);
   loadPractice(cards.find(card => card.id === app.practiceId)?.id || cards[0]?.id || null);
   render();
@@ -970,29 +1111,34 @@ function renderPracticeOverview(cards, progress) {
     return btn;
   }));
   return el("section", { class: "practice-overview", "aria-label": "练习进度" },
-    el("div", { class: "practice-overview-top" }, el("div", {}, text("h2", "练习进度"), text("p", "一步一步，完成这一组回忆。")), el("div", { class: "practice-progress-count" }, text("strong", completed), ` / ${cards.length} 张已完成`)),
+    el("div", { class: "practice-overview-top" }, text("h2", "练习进度"), el("div", { class: "practice-progress-count" }, text("strong", completed), ` / ${cards.length} 张已完成`)),
     el("progress", { class: "practice-progress-bar", value: completed, max: Math.max(1, cards.length), "aria-label": `已完成 ${completed} 张，共 ${cards.length} 张` }),
-    el("div", { class: "practice-overview-bottom" }, tabs, text("p", "按当前卡片版本统计。收到分析结果即完成，完成不代表答对。", "helper")));
+    el("div", { class: "practice-overview-bottom" }, tabs, helpDetails("完成如何统计", text("p", "按当前卡片版本统计，收到分析结果即完成，不代表答对。", "helper"))));
 }
 function renderRecentAttempts() {
-  const recent = app.data.attempts.slice().reverse().slice(0, 5);
+  const recent = app.data.attempts.filter(practiceRecordMatches).slice().reverse().slice(0, 5);
   if (!recent.length) return null;
-  return panel("最近练习", "题目与原文保留提交时的版本", el("div", { class: "attempt-list" }, ...recent.map(attempt => button(el("div", {}, text("p", attempt.card_snapshot?.question || app.data.cards.find(c => c.id === attempt.card_id)?.question || "练习记录"), el("div", { class: "two-buttons" }, badge(attempt.status === "completed" ? verdictNames[attempt.diagnosis?.verdict] || "已分析" : { pending: "分析中", failed: "分析失败", unanswered: "未作答" }[attempt.status] || attempt.status, attempt.status === "failed" ? "red" : verdictColors[attempt.diagnosis?.verdict] || ""), text("small", formatDate(attempt.created_at)))), () => selectPractice(attempt.card_id, attempt), "attempt-item", app.busy))));
+  return panel("最近练习", null, el("div", { class: "attempt-list" }, ...recent.map(attempt => button(el("div", {}, text("p", attempt.card_snapshot?.question || app.data.cards.find(c => c.id === attempt.card_id)?.question || "练习记录"), el("div", { class: "two-buttons" }, badge(attempt.status === "completed" ? verdictNames[attempt.diagnosis?.verdict] || "已分析" : { pending: "分析中", failed: "分析失败", unanswered: "未作答" }[attempt.status] || attempt.status, attempt.status === "failed" ? "red" : verdictColors[attempt.diagnosis?.verdict] || ""), text("small", formatDate(attempt.created_at)))), () => selectPractice(attempt.card_id, attempt), "attempt-item", app.busy))));
 }
-function renderPractice() {
-  const approved = app.data.cards.filter(c => c.status === "approved");
+function renderPracticeContent() {
+  const approved = practiceScope();
   const progress = PracticeProgress.getProgress(approved, app.data.attempts);
   const filtered = PracticeProgress.filterCards(approved, progress, app.practiceFilter);
   const completedCount = approved.filter(card => progress.get(card.id)?.completed).length;
-  const page = el("div", {}, heading("03 / 主动回忆", "把记住的，变成理解的", "先用自己的话回答，再对照反馈和讲义，补上遗漏的知识点。"));
+  const page = el("div", {});
   page.append(renderPracticeOverview(approved, progress));
   if (!approved.length && !app.attempt) {
+    if (app.data.cards.some(card => card.status === "approved" && !card.source_outdated)) {
+      page.append(panel("练习空间", null, empty("没有匹配的练习卡片", "调整上方讲义、关键词或配图条件后重试。")));
+      const history = renderRecentAttempts(); if (history) page.append(history);
+      return page;
+    }
     page.append(panel("练习空间", null, empty("还没有可学习的卡片", "新卡片会自动检查，通过后即可学习。有疑点的卡片可在检查结果中处理。", button("查看检查结果  →", () => setView("review")), "◎")));
     const history = renderRecentAttempts();
     if (history) { history.classList.add("practice-history-only"); page.append(history); }
     return page;
   }
-  if (approved.length && completedCount === approved.length) page.append(el("div", { class: "practice-complete-banner", role: "status" }, el("div", {}, text("strong", "本组练习已完成 ✓"), text("p", "每张卡片都已收到分析结果。可以回看反馈，继续巩固需要修正的地方。", "helper")), app.practiceFilter !== "completed" ? button("查看已完成卡片", () => changePracticeFilter("completed"), "btn secondary small", app.busy) : null));
+  if (approved.length && completedCount === approved.length) page.append(el("div", { class: "practice-complete-banner", role: "status" }, text("strong", "本组练习已完成 ✓"), app.practiceFilter !== "completed" ? button("查看已完成卡片", () => changePracticeFilter("completed"), "btn secondary small", app.busy) : null));
   if (!filtered.length && !app.attempt) {
     page.append(panel(practiceFilterNames[app.practiceFilter], null, empty(app.practiceFilter === "completed" ? "还没有已完成的卡片" : "当前没有未完成的卡片", app.practiceFilter === "completed" ? "提交非空答案并收到分析结果后，卡片会出现在这里。" : "可以切换到已完成，回看反馈或再次作答。", button(app.practiceFilter === "completed" ? "去做未完成卡片 →" : "回看已完成卡片 →", () => changePracticeFilter(app.practiceFilter === "completed" ? "uncompleted" : "completed")), "✓")));
     const history = renderRecentAttempts();
@@ -1013,19 +1159,20 @@ function renderPractice() {
   if (outsideFilter && app.attempt) options.unshift(el("option", { value: app.practiceId, selected: true }, `${card.question}（${historicalVersion ? "历史记录" : "本次反馈"}）`));
   const selector = el("select", { "aria-label": "选择练习卡片", disabled: app.busy }, ...options);
   selector.addEventListener("change", () => selectPractice(selector.value));
-  const answer = el("textarea", { id: "practice-answer", class: "practice-answer", maxlength: "4000", placeholder: "写下你的理解。可以是一句定义，也可以是你自己的例子……", value: app.answer, disabled: app.busy || historicalVersion, "aria-label": "你的回答" });
+  const answer = el("textarea", { id: "practice-answer", class: "practice-answer", maxlength: "4000", placeholder: "用自己的话回答…", value: app.answer, disabled: app.busy || historicalVersion, "aria-label": "你的回答" });
   const answerCount = text("span", `${app.answer.length} / 4000`, "answer-count");
-  const draftNote = text("p", currentCard && practiceDraft(currentCard) ? "未提交的草稿已保留在当前标签页，切换卡片或刷新后可继续。" : "切换卡片时会保留未提交的草稿。", "helper practice-draft-note");
+  const draftNote = text("span", "草稿已保留", "helper practice-draft-note");
+  draftNote.hidden = !currentCard || !practiceDraft(currentCard);
   answer.addEventListener("input", () => {
     app.answer = answer.value;
     answerCount.textContent = `${answer.value.length} / 4000`;
     if (currentCard && !historicalVersion) savePracticeDraft(currentCard, answer.value);
-    draftNote.textContent = "未提交的草稿已保留在当前标签页，切换卡片或刷新后可继续。";
+    draftNote.hidden = !answer.value;
     // Editing starts a new attempt. A previous completion cannot reveal its answer images.
     if (app.attempt) {
       app.attempt = null;
       // Replace only feedback: keep the textarea, selection and IME composition intact.
-      const waiting = panel("新的回答尚未提交", "提交后查看本次反馈与参考答案", text("p", "你的修改已保留。重新提交并完成分析后，即可查看对应的参考答案与配图。", "helper"));
+      const waiting = panel("新的回答尚未提交", null, text("p", "提交后查看反馈与参考答案。", "helper"));
       waiting.classList.add("feedback-panel");
       $("#practice-feedback")?.replaceChildren(...[waiting, renderRecentAttempts()].filter(Boolean));
     }
@@ -1035,7 +1182,7 @@ function renderPractice() {
   const status = el("div", { class: "practice-card-status" }, badge(historicalVersion ? "历史版本" : currentProgress?.completed ? "已完成" : "未完成", historicalVersion ? "amber" : currentProgress?.completed ? "green" : "blue"));
   if (currentProgress?.completedAttempt && !historicalVersion) status.append(text("span", `最近一次完成：${verdictNames[currentProgress.completedAttempt.diagnosis.verdict]}`, "helper"));
   const imageCard = app.attempt ? app.attempt.card_snapshot : card;
-  const form = el("form", {}, field("当前练习", selector), status, el("div", { class: "two-buttons" }, badge(card.concept, "green"), badge(card.kind === "remediation" ? "补充练习" : "基础卡片", "blue")), el("h2", { id: "practice-question", tabindex: "-1", class: "practice-question" }, card.question), CardImages.gallery(CardImages.questionImages(card, app.attempt), app.data.media, "题目配图"), CardImages.refs(imageCard).length ? text("p", "配图仅供本机查看，AI 诊断不会理解图片。作答与评分以题目文字、原文和评分要点为依据；答案侧配图在有效分析完成后的参考答案中查看。", "helper card-image-ai-note") : null, field("你的回答", answer), el("div", { class: "answer-toolbar" }, text("span", "不必照抄原句，表达清楚就好。"), answerCount), !historicalVersion ? draftNote : null, errorNode);
+  const form = el("form", {}, field("当前练习", selector), status, el("div", { class: "two-buttons" }, badge(card.concept, "green"), badge(card.kind === "remediation" ? "补充练习" : "基础卡片", "blue")), Object.assign(text("h2", card.question, "practice-question"), { id: "practice-question", tabIndex: -1 }), CardImages.gallery(CardImages.questionImages(card, app.attempt), app.data.media, "题目配图"), CardImages.refs(imageCard).length ? text("p", "AI 仅分析文字，不读取配图。", "helper card-image-ai-note") : null, field("你的回答", answer), el("div", { class: "answer-toolbar" }, !historicalVersion ? draftNote : null, answerCount), errorNode);
   const justCompleted = outsideFilter && !historicalVersion && app.practiceFilter === "uncompleted" && currentProgress?.completed;
   if (outsideFilter && !historicalVersion) form.append(text("p", justCompleted ? "这张卡片已移入「已完成」。先看完反馈，再继续下一张。" : "正在查看当前分类以外的练习记录。可切换分类或继续下一张。", "practice-selection-note"));
   if (historicalVersion) form.append(note(currentCard ? "正在查看提交时的题目版本。点击「重新作答」，可使用当前已批准的版本。" : "这张卡片目前未批准，历史回答与反馈仍可查看。", "warning"));
@@ -1047,7 +1194,7 @@ function renderPractice() {
   const next = button("下一张 →", () => { if (nextCard) { selectPractice(nextCard.id); announce(`已切换到下一张：${nextCard.question}`); } }, "btn", app.busy || !nextCard);
   const position = currentIndex >= 0 ? `${practiceFilterNames[app.practiceFilter]} · 第 ${currentIndex + 1} / ${filtered.length} 张${!nextCard ? " · 已到最后一张" : ""}` : justCompleted ? `未完成还剩 ${filtered.length} 张` : `${practiceFilterNames[app.practiceFilter]} ${filtered.length} 张 · 查看历史反馈`;
   const navigation = el("div", { class: "practice-navigation" }, text("span", position, "practice-position"), el("div", { class: "practice-navigation-actions" }, button("← 上一张", () => { if (previousCard) selectPractice(previousCard.id); }, "btn secondary", app.busy || !previousCard), next));
-  form.append(el("div", { class: "two-buttons" }, submit, app.attempt ? reset : null), navigation, el("div", { class: "practice-tip" }, text("span", "◎"), text("span", app.data.mode === "demo" ? "当前为演示模式，使用本地规则演示反馈流程，不代表云端模型的诊断效果。" : "提交时会将这道题、相关原文、评分要点和你的回答发送给所配置的云端模型。")));
+  form.append(el("div", { class: "two-buttons" }, submit, app.attempt ? reset : null), navigation, el("div", { class: "practice-tip" }, text("span", app.data.mode === "demo" ? "演示模式 · 使用本地规则" : "提交会向已配置模型发送题目、原文、评分要点与回答，并消耗 API 额度。")));
   form.addEventListener("submit", async event => {
     event.preventDefault();
     if (app.busy || !currentCard || historicalVersion) return;
@@ -1071,18 +1218,18 @@ function renderPractice() {
   });
   const right = el("div", { class: "stack", id: "practice-feedback", "aria-busy": String(app.busy) });
   if (app.busy) {
-    const pending = panel("正在分析", "对照原文，逐项检查你的理解", el("div", { class: "pending-feedback" }, el("span", { class: "spinner", "aria-hidden": "true" }), text("h3", "正在整理本次反馈"), text("p", "分析完成后，会在这里显示判断和具体依据。", "helper")));
+    const pending = panel("正在分析", null, el("div", { class: "pending-feedback" }, el("span", { class: "spinner", "aria-hidden": "true" }), text("p", "正在核对原文与回答…", "helper")));
     pending.classList.add("feedback-panel");
     right.append(pending);
   } else if (app.attempt) right.append(renderAttempt(app.attempt));
   else {
-    const waiting = panel("你的学习反馈", "提交回答后，在这里查看", el("div", { class: "feedback-empty" }, text("span", "◎", "empty-symbol"), text("h3", "每一次回忆，都更进一步"), text("p", "先独立回答，再了解哪些已掌握、哪些还需要补充。", "helper"), el("ol", { class: "steps-list" }, el("li", {}, text("strong", "看清理解程度"), text("div", "区分正确、不完整、错误与无法判断。", "helper")), el("li", {}, text("strong", "找到具体依据"), text("div", "对照评分要点与讲义原文。", "helper")), el("li", {}, text("strong", "继续巩固知识"), text("div", "有匹配的已审核补练时，再试一道题。", "helper")))));
+    const waiting = panel("本次反馈", null, el("div", { class: "feedback-empty" }, text("span", "◎", "empty-symbol"), text("p", "提交回答后查看分析。", "helper")));
     waiting.classList.add("feedback-panel");
     right.append(waiting);
   }
   const history = renderRecentAttempts();
   if (history) right.append(history);
-  const practice = panel("主动回忆", `${practiceFilterNames[app.practiceFilter]} ${filtered.length} 张 · 作答后可继续下一张`, form);
+  const practice = panel("主动回忆", null, form);
   practice.classList.add("practice-panel");
   page.append(el("div", { class: "practice-grid" }, practice, right));
   return page;
@@ -1177,7 +1324,7 @@ function renderAttempt(attempt) {
   if (attempt.remediation) {
     const card = attempt.remediation;
     body.append(el("div", { class: "remediation-box" }, text("div", "针对这个知识点，再试一题", "label"), text("p", card.question), button("去做补充练习  →", () => selectPractice(card.id), "btn small", app.busy)));
-  } else if (result.verdict !== "correct") body.append(text("p", "当前没有匹配的已审核补充练习。可先回顾原文，并到审核页批准相应补练。", "helper"));
+  }
   return feedbackPanel("本次反馈", `${formatDate(attempt.created_at)} · 基于提交时的卡片版本`, body);
 }
 
@@ -1200,17 +1347,22 @@ async function downloadExport(path, filename) {
 }
 
 function renderExport() {
-  const cards = app.data.cards;
+  const documentId = app.exportDocumentId === undefined ? app.documentId || "" : app.exportDocumentId;
+  const cards = app.data.cards.filter(card => !documentId || card.document_id === documentId);
   const approved = cards.filter(card => card.status === "approved");
   const imageCards = approved.filter(card => CardImages.refs(card).length);
   const hasImages = imageCards.length > 0;
-  const page = el("div", {}, heading("04 / 长期复习", "把理解，留给未来的自己", "将已批准的卡片导入 Anki，安排后续复习。来源与本机练习链接会一并保留。"));
+  const page = el("div", {}, heading(null, "导出至 Anki", null));
+  const scope = el("select", { "aria-label": "选择导出讲义" }, el("option", { value: "", selected: !documentId }, "全部讲义"),
+    ...(app.data.documents || []).map(document => el("option", { value: document.id, selected: document.id === documentId }, document.title)));
+  scope.addEventListener("change", () => { app.exportDocumentId = scope.value; render(); });
+  page.append(field("导出范围", scope));
   page.append(el("div", { class: "stats" }, ...[[approved.length, "可导出的已批准卡片"], [cards.filter(c => c.status === "draft").length, "检查中或待处理"], [approved.filter(c => c.kind === "remediation").length, "其中的补充练习"]].map(([n, desc]) => el("div", { class: "stat" }, text("div", String(n).padStart(2, "0"), "stat-number"), text("p", desc)))));
   const errorNode = el("p", { class: "inline-error", role: "alert" });
   const downloadButton = (label, path, filename, primary = false) => {
     const btn = button(label, () => actionWithButton(btn, "正在打包…", async () => {
-      await downloadExport(path, filename);
-      toast("已发起下载，请在浏览器下载列表中查看。");
+      await downloadExport(path + (documentId ? `?document_id=${encodeURIComponent(documentId)}` : ""), filename);
+      toast(window.ankisenseDesktop ? "已发起下载，请留意保存提示。" : "已发起下载，请在浏览器下载列表中查看。");
     }, errorNode), `btn ${primary ? "" : "secondary "}full`, !approved.length);
     return btn;
   };
@@ -1218,12 +1370,11 @@ function renderExport() {
   const downloads = el("div", { class: "export-downloads" }, exportButton, errorNode);
   const download = el("div", {},
     el("div", { class: "export-art", "aria-hidden": "true" }, text("span", "a", "card-mini"), text("span", "→"), text("span", "✦", "card-mini anki-mini")),
-    badge("推荐 · Anki 牌组包", "green"), text("h2", "一个文件，带上完整卡片"),
-    text("p", hasImages ? `其中 ${imageCards.length} 张带配图 · 图片、来源与卡片样式一起打包` : "题目、答案、来源与卡片样式一起打包", "helper"),
+    text("p", hasImages ? `含 ${imageCards.length} 张图文卡片` : "含题目、答案与来源", "helper"),
     el("hr", { class: "section-divider" }),
     approved.some(c => c.is_demo) ? note("导出中包含自编演示卡片，来源信息会保留演示标记。", "warning") : null,
     downloads,
-    text("p", "在 Anki 中直接导入 .apkg，无需解压或手动建立字段。题目配图在正面显示，答案配图在翻面后显示。", "helper"),
+    text("p", "下载后在 Anki 中导入 .apkg 文件。", "helper"),
     button("回到卡片审核", () => setView("review"), "btn quiet"));
   const fieldRows = [["NoteID", "稳定标识，用于重复导入更新"], ["Question", "问题"], ["Answer", "参考答案"], ["Concept", "知识概念"], ["SourceFile", "来源文件或材料标题"], ["PDFPage", "PDF 实际页序（文本材料留空）"], ["SourceQuote", "原文引用"], ["PracticeURL", "本机练习地址"]];
   const alternativeFormats = el("details", { class: "feedback-details export-alternatives" }, text("summary", "其他格式 · TSV / 图文 ZIP"),
@@ -1239,13 +1390,13 @@ function renderExport() {
       el("table", { class: "field-table" }, el("thead", {}, el("tr", {}, text("th", "字段顺序"), text("th", "内容"))), el("tbody", {}, ...fieldRows.map(([name, description], index) => el("tr", {}, text("td", `${index + 1}. ${name}`), text("td", description)))))));
   const instructions = el("div", {}, el("ol", { class: "steps-list" },
     el("li", {}, text("strong", "下载 APKG 牌组包"), text("div", "卡片检查通过后，点击左侧下载按钮。已保存的配图会自动随卡片打包。", "helper")),
-    el("li", {}, text("strong", "在 Anki 中导入文件"), text("div", "打开 Anki，点击「导入文件」，选择 ankisense-approved.apkg。导入后进入 AnkiSense 牌组开始复习。", "helper")),
-    el("li", {}, text("strong", "修改后，再次导入更新"), text("div", "在网页修改、检查通过并重新导出同一卡片。导入时可将更新笔记设为「始终」，以网页内容更新；这会覆盖你直接在 Anki 中修改的字段。不要启用「导入任何学习进度」。", "helper"))),
-    text("p", "如果之前用 TSV 导入过相同卡片，首次改用 APKG 可能出现两份笔记；两种格式的已有笔记不会自动合并。", "helper"),
-    text("p", "卡片上的「用自己的话回答」会打开本机 AnkiSense，需要网页服务正在运行；在其他设备上不能直接使用这个本机链接。", "helper"),
+    el("li", {}, text("strong", "在 Anki 中导入文件"), text("div", "打开 Anki，点击「导入文件」，选择 ankisense-approved.apkg。", "helper"))),
+    helpDetails("更新卡片与注意事项",
+      text("p", "再次导入同一卡片时，更新笔记设为「始终」会覆盖 Anki 内的字段修改；不要启用「导入任何学习进度」。", "helper"),
+      text("p", "从 TSV 改用 APKG 可能产生重复笔记。卡片的本机练习链接需要此电脑上的 AnkiSense 正在运行。", "helper")),
     alternativeFormats);
   if (typeof AnkiSetup !== "undefined") page.append(AnkiSetup.create({ api, jsonOptions }));
-  page.append(el("div", { class: "export-grid" }, panel("导出已批准卡片", "草稿与已拒绝卡片不会导出", download), panel("导入 Anki，只需两步", "下载牌组包，再在 Anki 中打开", instructions)));
+  page.append(el("div", { class: "export-grid" }, panel("导出可学习卡片", null, download), panel("导入方法", null, instructions)));
   return page;
 }
 

@@ -1,4 +1,4 @@
-"""Recoverable document-wide card generation. Machine checks never approve cards."""
+"""Recoverable card generation with manual and unattended review paths."""
 from __future__ import annotations
 
 import asyncio
@@ -15,18 +15,16 @@ from pydantic import Field, model_validator
 
 from .card_quality import rule_issues, validate_quality_report
 from .evidence import validate_card
-from .figure_vision import FigureCheckRequest
 from .llm import AIError
 from .ocr_calibration import analyze_page
 from .prompts import AUTO_CARD_PROMPT_VERSION
-from .schemas import (CardDraft, ImageRecommendationAdoptRequest,
-                      ImageRecommendationRequest, SourceBlock, StrictModel)
+from .schemas import (CardDraft, ImageRecommendationRequest, SourceBlock, StrictModel)
 from .sources import require_current_reviewed
 from .source_policy import source_usable
 from .source_calibration_models import CalibrationRequest
 
 
-PIPELINE_VERSION = "auto-cards-v1"
+PIPELINE_VERSION = "auto-cards-v4-split-and-rework"
 ACTIVE = {"pending", "running"}
 
 
@@ -75,9 +73,24 @@ def batch_blocks(blocks):
     return batches
 
 
+def automatic_batches(blocks, count=None):
+    """With an explicit budget, give each page its own share before repeats."""
+    if count is None:
+        return batch_blocks(blocks)
+    pages = {}
+    for block in blocks:
+        pages.setdefault(block.page, []).append(block)
+    return [batch for page in pages.values() for batch in batch_blocks(page)]
+
+
+def automatic_batch_id(focus, pass_index=0):
+    base = digest([[block.block_id, block.text] for block in focus])[:24]
+    return digest([base, pass_index])[:24] if pass_index else base
+
+
 def automatic_plan(blocks, count=None, max_cards=600):
     """Plan the visual workflow locally without reducing its material limits."""
-    groups = batch_blocks(blocks)
+    groups = automatic_batches(blocks, count)
     selected = list(range(len(groups)))
     if count is not None and count < len(groups):
         selected = ([len(groups) // 2] if count == 1 else
@@ -88,22 +101,31 @@ def automatic_plan(blocks, count=None, max_cards=600):
     if count is not None and selected:
         quotas = {index: 1 for index in selected}
         for _ in range(count - len(selected)):
-            choices = [index for index in selected if quotas[index] < 6]
-            if not choices:
-                break
-            index = min(choices, key=lambda key: quotas[key])
+            index = min(selected, key=lambda key: quotas[key])
             quotas[index] += 1
+    batches = []
+    rounds = max((math.ceil(value / 6) for value in quotas.values() if value), default=1)
+    for pass_index in range(rounds):
+        for index in selected:
+            quota = None if quotas[index] is None else min(6, quotas[index] - pass_index * 6)
+            if quota is not None and quota <= 0:
+                continue
+            focus = groups[index]
+            batches.append({"index": index + 1, "pass_index": pass_index, "count": quota,
+                            "batch_id": automatic_batch_id(focus, pass_index),
+                            "block_ids": [block.block_id for block in focus],
+                            "pages": sorted({block.page for block in focus})})
     selected_pages = sorted({block.page for index in selected for block in groups[index]})
     return {"recommended_count": min(max_cards, max(len(groups), math.ceil(chars / 700))),
-            "target_count": count, "max_count": max_cards, "total_batches": len(selected),
+            "strategy": "page-balanced-v2", "planned_count": sum(b["count"] or 0 for b in batches) if count is not None else None,
+            "target_count": count, "max_count": max_cards, "total_batches": len(batches),
             "coverage_ratio": round(covered / chars, 4) if chars else 0,
+            "source_coverage_ratio": round(covered / chars, 4) if chars else 0,
             "partial_scope": covered < chars,
             "selected_pages": selected_pages,
             "omitted_pages": sorted({block.page for block in blocks} - set(selected_pages)),
-            "suggestion_reason": "按有效文字与分批覆盖估计；不代表知识点总数，证据不足或重复的候选不会为凑数保留。",
-            "batches": [{"index": index + 1, "count": quotas[index],
-                         "block_ids": [block.block_id for block in groups[index]],
-                         "pages": sorted({block.page for block in groups[index]})} for index in selected]}
+            "suggestion_reason": "指定数量时优先分配不同来源页；来源纳入计划不等于知识点已覆盖，证据不足或重复的候选不会为凑数保留。",
+            "batches": batches}
 
 
 def context_blocks(blocks, focus):
@@ -156,10 +178,11 @@ class AutoCardService:
 
     @staticmethod
     def _public(job):
+        from .job_progress import summarize_batches
         keys = ("id", "document_id", "status", "stage", "progress", "card_ids", "issues",
                 "message", "error", "created_at", "updated_at", "options", "skipped_count",
                 "knowledge_count", "calibration", "pipeline_version", "prompt_version", "plan",
-                "rejected_cards", "rejected_count", "failure")
+                "rejected_cards", "rejected_count", "rejected_knowledge", "filtered_knowledge", "coverage", "failure", "split_history")
         result = {key: job.get(key) for key in keys}
         legacy_partial = (job.get("options", {}).get("autonomous") and job["status"] == "completed"
                           and any(not batch.get("status") for batch in job.get("batches", []))
@@ -167,6 +190,8 @@ class AutoCardService:
         if legacy_partial:
             result["status"] = "partial"
         result["retryable"] = job.get("retryable", result["status"] in {"partial", "failed", "cancelled", "awaiting_confirmation", "interrupted"})
+        if job.get("options", {}).get("autonomous"):
+            result["batch_summary"], result["remaining_details"] = summarize_batches(job)
         return result
 
     def list(self, document_id: str):
@@ -328,7 +353,8 @@ class AutoCardService:
             job.pop("failure", None)
             job["config"] = config
             job["identity"] = digest([job["document_id"], job["source_signature"], job["options"], config, PIPELINE_VERSION])
-            job.update(status="pending", error=None, message="继续处理未完成的批次。", updated_at=now())
+            job.update(status="pending", error=None, prompt_version=AUTO_CARD_PROMPT_VERSION,
+                       message="继续处理未完成的批次。", updated_at=now())
             self.store.put("auto_card_jobs", job)
             self._launch(job_id)
             return self._public(job)
@@ -518,21 +544,7 @@ class AutoCardService:
                     result = {"status": "needs_review", "message": "配图推荐未完成，可在工作台重新推荐。", "job_id": recommendation["id"]}
                 else:
                     candidates = recommendation.get("candidates", [])
-                    result = {"status": "recommended", "message": "配图候选已准备，请在工作台核对。", "job_id": recommendation["id"], "candidate_ids": [c["id"] for c in candidates]}
-                    safe = [c for c in candidates if c.get("kind") != "page" and not c.get("quality_flags")]
-                    if mode == "checked" and len(safe) == 1:
-                        candidate = safe[0]
-                        checked = await self.image_checks.check(card["id"], FigureCheckRequest(job_id=recommendation["id"], candidate_id=candidate["id"], card_version=card["version"], side="answer"))
-                        if (checked["classification"]["label"] in {"diagram", "table", "chart", "formula", "photo"}
-                                and checked["relation"] == "supported" and checked["completeness"] == "complete" and checked["legibility"] == "clear"):
-                            media = await self.recommendations.adopt(card["id"], ImageRecommendationAdoptRequest(job_id=recommendation["id"], candidate_id=candidate["id"], card_version=card["version"]))
-                            result.update(status="attached", message="已将检查通过的讲义图附在答案侧，仍需核对批准。", check_id=checked["id"])
-                            card = {**card, "images": [{"media_id": media["id"], "side": "answer", "caption": f"讲义第 {candidate['page']} 页"}], "version": card["version"] + 1}
-                            card["auto_quality"] = {**card["auto_quality"], "card_version": card["version"]}
-                        else:
-                            result.update(status="needs_review", message="配图检查发现疑点或无法确定，请人工选择。", check=checked)
-                    elif mode == "checked":
-                        result.update(status="needs_review", message="没有唯一且无裁剪疑点的候选，请人工选择。")
+                    result = {"status": "recommended", "message": "引用页原图已准备，可在工作台裁剪。", "job_id": recommendation["id"], "candidate_ids": [c["id"] for c in candidates]}
             elif mode != "off":
                 result["message"] = "纯文本材料没有讲义图片，可继续使用文字卡片。"
         except HTTPException as error:

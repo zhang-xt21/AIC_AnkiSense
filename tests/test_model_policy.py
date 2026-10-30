@@ -10,7 +10,7 @@ from ankisense.demo import seed_records
 from ankisense.llm import AIError, AIService, Settings
 from ankisense.model_policy import generation_options
 from ankisense.schemas import CardDraft, SourceBlock
-from tools.docling_enrichment_worker import generation_params
+from ankisense.figure_vision import generation_params
 
 
 @pytest.mark.parametrize("endpoint,model,disabled", [
@@ -41,7 +41,7 @@ def test_all_model_tasks_disable_deepseek_thinking_without_affecting_compatible_
     card = CardDraft.model_validate({key: record[key] for key in CardDraft.model_fields})
     blocks = [SourceBlock.model_validate(record) for table, record in records if table == "blocks"]
     citation = {"block_id": card.evidence[0].block_id, "exact_quote": card.evidence[0].quote}
-    review = {"minimal_answer": card.answer, "minimal_answer_citations": [citation], "decision": "pass", "question_answerable": True, "answer_relevant": True,
+    review = {"learning_scope": {"verdict": "single", "targets": [{"question_span": card.question, "goal": "栈操作"}], "reason": "同一核心目标。"}, "minimal_answer": card.answer, "minimal_answer_citations": [citation], "decision": "pass", "question_answerable": True, "answer_relevant": True,
               "answer_supported": True, "unsupported_claims": [], "answer_citations": [citation],
               "question_coverage": "complete", "missing_question_parts": [],
               "rubric_checks": [{"point_id": point.point_id, "verdict": "supported", "scope": "required", "scope_reason": "回答所问。", **citation}

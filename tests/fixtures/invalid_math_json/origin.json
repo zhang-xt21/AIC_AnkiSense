@@ -1,0 +1,21 @@
+{
+  "origin": "0.1.17 quality retest, 2026-10-29; response content only, no request headers or credentials",
+  "requests": {
+    "105": {
+      "sha256": "10ffad4cb550da72d2bcc13939976c6f9c2f355fd11492e23a3131baa53755ae",
+      "cards_recovered": 3
+    },
+    "106": {
+      "sha256": "ea558a838c6ef5449edd567fd2f62ee286f493b35ad5f558930d2bc747a22798",
+      "cards_recovered": 3
+    },
+    "108": {
+      "sha256": "6b56edde255df45150a142efea91e6e67e98557989913e4a6acf887c06425978",
+      "cards_recovered": 3
+    },
+    "109": {
+      "sha256": "de2f76ad83d4098d628e54ed6ef16d4bd3b21af73225ab4a254a2b78d9798b46",
+      "cards_recovered": 3
+    }
+  }
+}

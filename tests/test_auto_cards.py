@@ -10,7 +10,7 @@ from ankisense.auto_card_models import (CardQualityReport, KnowledgeBatch,
                                       KnowledgeCard, KnowledgeCardBatch, KnowledgePoint,
                                       QualityIssue)
 from ankisense.llm import AIError, Settings
-from ankisense.schemas import CardDraft, Evidence, RubricPoint, SourceBlock
+from ankisense.schemas import CardDraft, Diagnosis, Evidence, RubricPoint, SourceBlock
 from ankisense.sources import page_records
 
 
@@ -54,6 +54,14 @@ class FakeAI:
     async def repair_card(self, card, blocks, report):
         self.repair_calls += 1
         return card
+
+    async def diagnose_answer(self, card, blocks, answer):
+        return Diagnosis(verdict="correct", addressed_point_ids=[p.point_id for p in card.rubric],
+                         missing_point_ids=[], contradicted_point_ids=[], answer_spans=[answer],
+                         source_block_ids=[card.evidence[0].block_id], reason="离线自测固定响应，不代表模型准确率。")
+
+    async def minimal_answer_for_question(self, card, blocks):
+        return card.answer  # Explicit offline fixture, not semantic evaluation.
 
 
 @pytest.fixture
@@ -278,8 +286,8 @@ def test_exact_duplicates_are_not_saved_twice(client):
     assert any(i["code"] == "duplicate_card" for i in job["issues"])
 
 
-@pytest.mark.parametrize("mode,classification,expected", [("recommend", "diagram", "recommended"), ("checked", "diagram", "attached"), ("checked", "text", "needs_review")])
-def test_image_preparation_and_conservative_adoption(client, mode, classification, expected):
+@pytest.mark.parametrize("mode,classification,expected", [("recommend", "diagram", "recommended"), ("checked", "diagram", "recommended"), ("checked", "text", "recommended")])
+def test_image_preparation_never_checks_or_attaches_without_selection(client, mode, classification, expected):
     store = client.app.state.store
     text = "栈遵循后进先出，最后入栈的元素最先出栈。"
     doc = {"id": "pdf-" + "a" * 24, "title": "自编图文样本", "is_demo": False}
@@ -305,7 +313,7 @@ def test_image_preparation_and_conservative_adoption(client, mode, classificatio
     assert job["status"] == "completed", job
     card = cards(client)[0]
     assert card["image_result"]["status"] == expected
-    assert images.checks == (1 if mode == "checked" else 0)
+    assert images.checks == 0
     assert card["status"] == "draft"
     if expected == "attached":
         assert card["version"] == card["auto_quality"]["card_version"] == 2

@@ -227,7 +227,7 @@ def test_mocked_cloud_accepts_uncertain_for_nonanswers(monkeypatch, card, blocks
     assert len(calls) == 1
 
 
-def test_cloud_cannot_pass_unsupported_incomplete_and_does_not_retry(monkeypatch, card, blocks):
+def test_cloud_rejects_persistently_invalid_incomplete_after_one_directed_retry(monkeypatch, card, blocks):
     calls = []
 
     def handler(request):
@@ -239,7 +239,8 @@ def test_cloud_cannot_pass_unsupported_incomplete_and_does_not_retry(monkeypatch
 
     with pytest.raises(AIError, match="校验"):
         asyncio.run(cloud_service(monkeypatch, handler).diagnose_answer(card, blocks, "你好"))
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert "retry_feedback" in json.loads(json.loads(calls[1].content)["messages"][1]["content"])
 
 
 def test_cloud_generation_checks_count_and_evidence(monkeypatch, card, blocks):

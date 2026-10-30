@@ -13,7 +13,7 @@ from .evidence import validate_card
 from .prompts import CARD_REVIEW_PROMPT_VERSION
 
 
-MACHINE_APPROVAL_POLICY = "whole-card-review-v3-question-scope"
+MACHINE_APPROVAL_POLICY = "whole-card-review-v7-target-scope"
 
 
 def card_binding_hash(card):
@@ -113,6 +113,12 @@ def valid_machine_approval(store, card):
                 return False
             blocks.append(SourceBlock.model_validate(current))
         require_current_source(store, blocks)
+        from .reference_check import reference_answer_passes, minimal_answer_passes
+        draft = CardDraft.model_validate({key: card[key] for key in CardDraft.model_fields})
+        if not reference_answer_passes(record.get("reference_answer_check"), draft, blocks):
+            return False
+        if not minimal_answer_passes(record.get("minimal_answer_check"), draft, blocks):
+            return False
         if set(source_pages) != {str(block.page) for block in blocks}:
             return False
         for number, captured in source_pages.items():

@@ -14,7 +14,7 @@ import pytest
 
 from addons.ankisense_sync.collection_sync import BOOTSTRAP_GUID, BOOTSTRAP_NOTE_ID, FIELD_ORDER, MODEL_ID
 from ankisense.apkg import BACK, CSS, FRONT, MODEL_NAME
-from tools import build_anki_addon as builder
+from tools.build import build_anki_addon as builder
 
 
 @pytest.fixture

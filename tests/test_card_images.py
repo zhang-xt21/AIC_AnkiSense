@@ -392,14 +392,10 @@ def test_media_export_handles_old_text_only_cards_and_empty_selection(client):
     assert len(archive.namelist()) == 2
 
 
-def test_export_rejects_missing_assets_and_aggregate_limit(client, monkeypatch):
-    from ankisense import media as media_module
-
+def test_export_rejects_missing_assets(client):
     card = seed(client)[0]
     media = upload(client)
     assert update(client, card, status="approved", images=[{"media_id": media["id"]}]).status_code == 200
-    monkeypatch.setattr(media_module, "MAX_EXPORT_BYTES", 100)
-    assert client.get("/api/export/media").status_code == 413
-    monkeypatch.setattr(media_module, "MAX_EXPORT_BYTES", 50 * 1024 * 1024)
+    assert client.get("/api/export/media").status_code == 200
     (client.app.state.store.path.parent / "media" / f"{media['id']}.png").unlink()
     assert client.get("/api/export/media").status_code == 404

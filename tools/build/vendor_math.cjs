@@ -1,0 +1,11 @@
+"use strict";
+const fs = require("node:fs");
+const path = require("node:path");
+const root = path.resolve(__dirname, "../..");
+const source = path.dirname(require.resolve("katex/package.json"));
+const target = path.join(root, "ankisense/static/vendor/katex");
+fs.mkdirSync(target, { recursive: true });
+for (const name of ["katex.min.js", "katex.min.css"]) fs.copyFileSync(path.join(source, "dist", name), path.join(target, name));
+fs.cpSync(path.join(source, "dist/fonts"), path.join(target, "fonts"), { recursive: true });
+fs.copyFileSync(path.join(source, "LICENSE"), path.join(target, "LICENSE"));
+console.log("Vendored KaTeX " + require("katex/package.json").version);

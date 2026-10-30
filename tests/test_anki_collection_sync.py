@@ -35,7 +35,7 @@ def load_adapter():
 
 def test_real_anki_collection_sync(tmp_path):
     import pytest
-    runner = ROOT / "tools" / "run_anki_python.ps1"
+    runner = ROOT / "tools" / "anki" / "run_anki_python.ps1"
     runtime = Path(os.environ.get("ANKISENSE_ANKI_RUNTIME", ROOT / "origin" / "Anki"))
     if not (runtime / "python313.dll").is_file():
         pytest.skip("The optional installed official Anki runtime is not available")
@@ -357,6 +357,128 @@ class RealCollectionTests(unittest.TestCase):
         empty = {**self.bundle, "cards": [], "media": {}}
         self.assertTrue(self.apply(empty)["warnings"])
         self.assertEqual(self.col.note_count(), 1)
+
+    def test_inventory_checks_live_notes_and_cached_images(self):
+        name = "ankisense-img-" + "1" * 32 + ".png"
+        asset = {"filename": name, "sha256": hashlib.sha256(PNG).hexdigest(), "size_bytes": len(PNG)}
+        self.card["media"] = [asset]
+        self.bundle["media"] = {name: PNG}
+        self.apply()
+        entry = {key: self.card[key] for key in ("id", "guid", "version", "content_hash", "media")}
+        inventory = self.adapter.sync_inventory(self.col, [entry], self.bundle["server_id"], self.state_path)
+        self.assertEqual(inventory["unchanged_ids"], [self.card["id"]])
+        self.assertEqual(inventory["media"], {name: asset["sha256"]})
+        note = self.col.get_note(self.col.find_notes("NoteID:" + self.card["id"])[0])
+        note["Answer"] = "Local edit"
+        self.col.update_note(note)
+        self.assertEqual(self.adapter.sync_inventory(self.col, [entry], self.bundle["server_id"], self.state_path)["unchanged_ids"], [])
+        (Path(self.col.media.dir()) / name).unlink()
+        self.assertEqual(self.adapter.sync_inventory(self.col, [entry], self.bundle["server_id"], self.state_path)["media"], {})
+
+    def test_one_hundred_note_writes_merge_into_one_undo_step(self):
+        cards = self.batch_cards(100)
+        bundle = {**self.bundle, "cards": cards}
+        result = self.apply(bundle)
+        self.assertEqual(result["added"], 100)
+        self.assertFalse(result["conflicts"])
+        self.assertFalse(result["warnings"])
+        self.assertTrue(result["changes"].note)
+        self.assertTrue(result["changes"].notetype)
+        self.assertEqual(self.col.note_count(), 100)
+        before = self.schedule()
+        repeated = self.apply(bundle)
+        self.assertEqual((repeated["added"], repeated["updated"], repeated["unchanged"]), (0, 0, 100))
+        self.assertEqual(self.schedule(), before)
+        self.col.undo()
+        self.assertEqual(self.col.note_count(), 0)
+        self.assertIsNone(self.col.models.get(self.adapter.MODEL_ID))
+
+    def batch_cards(self, count):
+        cards = []
+        for index in range(count):
+            card = copy.deepcopy(self.card)
+            card.update(id=f"batch-note-{index}", guid=f"batchGUID{index}")
+            card["fields"]["NoteID"] = card["id"]
+            cards.append(card)
+        return cards
+
+    def test_large_batch_update_preserves_reviews_and_one_step_undo(self):
+        cards = self.batch_cards(100)
+        bundle = {**self.bundle, "cards": cards}
+        self.apply(bundle)
+        self.col.decks.select(self.deck_id)
+        reviewing = self.col.sched.getCard()
+        self.col.sched.answerCard(reviewing, 3)
+        before, logs = self.schedule(), self.col.db.all("SELECT * FROM revlog")
+        for card in cards:
+            card["version"] = 2
+            card["fields"]["Answer"] = "Updated answer"
+        result = self.apply(bundle)
+        self.assertEqual((result["added"], result["updated"], result["unchanged"]), (0, 100, 0))
+        self.assertFalse(result["warnings"])
+        self.assertEqual(self.schedule(), before)
+        self.assertEqual(self.col.db.all("SELECT * FROM revlog"), logs)
+        self.col.undo()
+        self.assertEqual(self.col.note_count(), 100)
+        for note_id in self.col.db.list("SELECT id FROM notes"):
+            self.assertEqual(self.col.get_note(note_id)["Answer"], "Answer.")
+        self.assertEqual(self.schedule(), before)
+        self.assertEqual(self.col.db.all("SELECT * FROM revlog"), logs)
+
+    def test_undo_merge_failure_reports_committed_note_and_can_resume(self):
+        cards = self.batch_cards(3)
+        bundle = {**self.bundle, "cards": cards}
+        original = self.col.merge_undo_entries
+        calls = 0
+        def fail_after_first_note(target):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("fixture undo history cleared")
+            return original(target)
+        with patch.object(self.col, "merge_undo_entries", side_effect=fail_after_first_note):
+            result = self.apply(bundle)
+        self.assertEqual(result["added"], 1)
+        self.assertTrue(result["stopped"])
+        self.assertTrue(result["changes"].note)
+        self.assertIn("撤销记录未能合并", result["warnings"][0])
+        self.assertEqual(self.col.note_count(), 1)
+        resumed = self.apply(bundle)
+        self.assertEqual((resumed["added"], resumed["unchanged"]), (2, 1))
+        self.assertEqual(self.col.note_count(), 3)
+        self.col.undo()
+        self.assertEqual(self.col.note_count(), 1)
+
+    def test_verified_cached_image_supports_update_and_races_do_not_overwrite(self):
+        name = "ankisense-img-" + "2" * 32 + ".png"
+        asset = {"filename": name, "sha256": hashlib.sha256(PNG).hexdigest(), "size_bytes": len(PNG)}
+        self.card["media"] = [asset]
+        self.bundle["media"] = {name: PNG}
+        self.apply()
+        changed = copy.deepcopy(self.bundle)
+        changed["cards"][0]["version"] = 2
+        changed["cards"][0]["fields"]["Answer"] = "Updated remotely"
+        changed["media"] = {}
+        changed["local_media"] = {name: asset["sha256"]}
+        result = self.apply(changed)
+        self.assertEqual(result["updated"], 1)
+        (Path(self.col.media.dir()) / name).write_bytes(b"local changed image")
+        result = self.apply(changed)
+        self.assertTrue(result["conflicts"])
+        self.assertEqual((Path(self.col.media.dir()) / name).read_bytes(), b"local changed image")
+
+    def test_scoped_and_partial_batches_do_not_warn_about_other_documents(self):
+        self.card["source"] = {"document_id": "doc-one"}
+        other = copy.deepcopy(self.card)
+        other.update(id="fixture-other", guid="fixtureOther")
+        other["fields"]["NoteID"] = other["id"]
+        other["source"] = {"document_id": "doc-two"}
+        self.apply({**self.bundle, "cards": [self.card, other]})
+        result = self.apply({**self.bundle, "catalog_ids": [self.card["id"]], "scope_document_id": "doc-one"})
+        self.assertFalse(result["warnings"])
+        result = self.apply({**self.bundle, "catalog_ids": [self.card["id"], other["id"]]})
+        self.assertFalse(result["warnings"])
+        self.assertEqual(self.col.note_count(), 2)
 
     def test_duplicate_identity_and_missing_deck_are_rejected(self):
         self.apply()

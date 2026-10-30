@@ -132,9 +132,9 @@ class ConnectionEvent(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: str = Field(pattern=r"^(heartbeat|sync)$")
     plugin_version: str = Field(min_length=1, max_length=40, pattern=r"^[0-9A-Za-z_.-]+$")
-    added: int = Field(default=0, ge=0, le=500, strict=True)
-    updated: int = Field(default=0, ge=0, le=500, strict=True)
-    unchanged: int = Field(default=0, ge=0, le=500, strict=True)
+    added: int = Field(default=0, ge=0, le=1000000, strict=True)
+    updated: int = Field(default=0, ge=0, le=1000000, strict=True)
+    unchanged: int = Field(default=0, ge=0, le=1000000, strict=True)
     conflicts: int = Field(default=0, ge=0, le=10000, strict=True)
     excluded: int = Field(default=0, ge=0, le=10000, strict=True)
 
@@ -168,7 +168,7 @@ class PluginAPI:
                     "server_id": identity["server_id"], "client_id": identity["client_id"],
                     "capabilities": {"approved_cards": True, "media_sha256": True, "answer_analysis": True,
                                      "attempt_polling": True, "schedule_write": False, "automatic_deletion": False,
-                                     "sync_mode": "full_manifest"},
+                                     "sync_mode": "full_manifest", "document_filter": True},
                     "ai": {"mode": settings.mode, "model": settings.model if settings.mode == "cloud" else "demo-rules-v1",
                            "configured": settings.mode == "demo" or bool(settings.api_key and settings.base_url and settings.model),
                            "requires_cloud_confirmation": settings.mode == "cloud", "images_in_answer_analysis": False},
@@ -176,8 +176,8 @@ class PluginAPI:
                                "recommended_timeout_seconds": settings.timeout_seconds + 30}}
 
         @self.router.get("/cards")
-        async def cards(identity=Depends(authorize)):
-            result = await asyncio.to_thread(self.sync.catalog, identity["base_url"])
+        async def cards(document_id: str | None = Query(default=None, min_length=1, max_length=100), identity=Depends(authorize)):
+            result = await asyncio.to_thread(self.sync.catalog, identity["base_url"], document_id)
             return {**result, "server_id": identity["server_id"]}
 
         @self.router.get("/cards/{card_id}")

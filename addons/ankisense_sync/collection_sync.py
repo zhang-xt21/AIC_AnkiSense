@@ -105,11 +105,15 @@ def _media_plan(col, card, bundle):
         if not MEDIA_NAME.fullmatch(name):
             raise SyncError("配图文件名无效，未写入卡片。")
         content = bundle["media"].get(name)
-        if (not isinstance(content, bytes) or hashlib.sha256(content).hexdigest() != asset["sha256"]):
-            raise SyncError("配图下载不完整或校验失败，未写入卡片。")
         path = directory / name
         if path.resolve().parent != directory:
             raise SyncError("Anki 中的同名配图位置异常，未覆盖图片。")
+        if content is None and bundle.get("local_media", {}).get(name) == asset["sha256"]:
+            if _file_matches(path, asset):
+                continue
+            raise SyncError("已缓存配图在同步期间变化或丢失，请重新同步。")
+        if (not isinstance(content, bytes) or hashlib.sha256(content).hexdigest() != asset["sha256"]):
+            raise SyncError("配图下载不完整或校验失败，未写入卡片。")
         if path.exists():
             try:
                 if path.read_bytes() != content:
@@ -119,6 +123,48 @@ def _media_plan(col, card, bundle):
         else:
             pending.append((name, content))
     return pending
+
+
+def _file_matches(path, asset):
+    try:
+        if path.is_symlink() or path.stat().st_size != asset["size_bytes"]:
+            return False
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(128 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == asset["sha256"]
+    except OSError:
+        return False
+
+
+def sync_inventory(col, entries, server_id, state_path):
+    """Read current Anki notes/media, not just an optimistic saved checkpoint."""
+    state = _load_state(Path(state_path), [])
+    tracked = state["servers"].get(server_id, {}).get("cards", {})
+    native = col.models.get(MODEL_ID)
+    matching_model = native is not None and state["models"].get(str(MODEL_ID)) == _hash(_model_view(native, native=True))
+    directory = Path(col.media.dir()).resolve()
+    media, unchanged = {}, []
+    for entry in entries:
+        for asset in entry["media"]:
+            name = asset["filename"]
+            if MEDIA_NAME.fullmatch(name) and _file_matches(directory / name, asset):
+                media[name] = asset["sha256"]
+        baseline = tracked.get(entry["id"])
+        if not matching_model or not baseline or baseline.get("content_hash") != entry["content_hash"]:
+            continue
+        if baseline["guid"] != entry["guid"] or baseline.get("card_version") != entry["version"]:
+            continue
+        ids = _note_ids(col, entry)
+        if ids != [baseline["note_id"]]:
+            continue
+        note = col.get_note(ids[0])
+        if (note.mid == MODEL_ID and note.guid == entry["guid"] and note.fields[0] == entry["id"]
+                and _hash(note.fields) == baseline["fields_hash"]
+                and all(media.get(asset["filename"]) == asset["sha256"] for asset in entry["media"])):
+            unchanged.append(entry["id"])
+    return {"media": media, "unchanged_ids": unchanged}
 
 
 def _install_model(col, remote):
@@ -189,8 +235,10 @@ def apply_bundle(col, bundle, deck_id, state_path):
     state = _load_state(path, result["warnings"])
     server = state["servers"].setdefault(bundle["server_id"], {"cards": {}})
     tracked = server["cards"]
-    present = {card["id"] for card in cards}
-    absent = set(tracked) - present
+    present = set(bundle.get("catalog_ids", [card["id"] for card in cards]))
+    scope = bundle.get("scope_document_id")
+    absent = {identifier for identifier, item in tracked.items() if identifier not in present
+              and (not scope or item.get("document_id") == scope)}
     if absent:
         result["warnings"].append(f"有 {len(absent)} 张已同步笔记未出现在当前批准清单，可能已撤销批准或来源过期；保留原笔记，请回到工作台核对。")
     if bundle.get("excluded"):
@@ -263,6 +311,26 @@ def apply_bundle(col, bundle, deck_id, state_path):
         if undo_target is None:
             undo_target = col.add_custom_undo_entry("AnkiSense 同步")
 
+    def merge_undo():
+        nonlocal undo_target
+        if undo_target is None:
+            return
+        try:
+            # Anki's undo history is bounded. Keep our marker at the top as we
+            # write, instead of letting a large batch evict it before merging.
+            result["changes"] = col.merge_undo_entries(undo_target)
+        except Exception:
+            # Merging is bookkeeping after committed writes, not a rollback.
+            # Return the real counts and invalidate views even if a hook or
+            # another add-on cleared the undo history during this operation.
+            undo_target = None
+            result["changes"] = OpChanges(card=True, note=True, deck=True, tag=True,
+                                          notetype=True, browser_table=True,
+                                          browser_sidebar=True, note_text=True,
+                                          study_queues=True)
+            result["warnings"].append("同步撤销记录未能合并，已停止后续卡片；已经写入的卡片已保留。可重新同步继续，本批内容可能需要分多次撤销。")
+            result["stopped"] = True
+
     def persist():
         nonlocal state_warning
         if not _save_state(path, state) and not state_warning:
@@ -291,6 +359,9 @@ def apply_bundle(col, bundle, deck_id, state_path):
             col.models.update_dict(updated)
             native_model = col.models.get(MODEL_ID)
         state["models"][str(MODEL_ID)] = _hash(remote)
+        merge_undo()
+        if result.get("stopped"):
+            return result
         for card, note, incoming, media, action in plans:
             committed = False
 
@@ -299,7 +370,8 @@ def apply_bundle(col, bundle, deck_id, state_path):
                 result[action] += 1
                 tracked[card["id"]] = {"guid": card["guid"], "note_id": note.id,
                                        "fields_hash": _hash(incoming), "card_version": card["version"],
-                                       "content_hash": card["content_hash"]}
+                                       "content_hash": card["content_hash"],
+                                       "document_id": card.get("source", {}).get("document_id")}
                 server["snapshot_id"] = bundle["snapshot_id"]
                 committed = True
                 persist()
@@ -345,8 +417,11 @@ def apply_bundle(col, bundle, deck_id, state_path):
                     except Exception:
                         pass
                 result["warnings"].append("写入中途遇到问题，已停止后续卡片；此前成功的笔记已保留。未引用的新图片可由 Anki 的媒体检查清理。")
+                result["stopped"] = True
+            finally:
+                merge_undo()
+            if result.get("stopped"):
                 break
     finally:
-        if undo_target is not None:
-            result["changes"] = col.merge_undo_entries(undo_target)
+        merge_undo()
     return result

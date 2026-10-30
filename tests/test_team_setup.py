@@ -8,8 +8,8 @@ import subprocess
 import pytest
 
 from ankisense.plugin_api import PluginConnection
-from tools import build_anki_addon as builder
-from tools import setup_anki
+from tools.build import build_anki_addon as builder
+from tools.setup import setup_anki
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -100,7 +100,7 @@ def powershell(tmp_path):
     def run(body):
         script = tmp_path / "setup-case.ps1"
         script.write_text("$ErrorActionPreference = 'Stop'\n. $env:TEST_SETUP_HELPER\n" + body, encoding="utf-8-sig")
-        env = {**os.environ, "TEST_SETUP_HELPER": str(ROOT / "tools" / "setup_helpers.ps1"), "TEST_SETUP_TEMP": str(tmp_path), "TEST_SETUP_ROOT": str(ROOT)}
+        env = {**os.environ, "TEST_SETUP_HELPER": str(ROOT / "tools" / "setup" / "setup_helpers.ps1"), "TEST_SETUP_TEMP": str(tmp_path), "TEST_SETUP_ROOT": str(ROOT)}
         result = subprocess.run([executable, "-NoLogo", "-NoProfile", "-File", str(script)], env=env, capture_output=True, timeout=30)
         assert result.returncode == 0, result.stdout.decode(errors="replace") + result.stderr.decode(errors="replace")
     return run
@@ -177,7 +177,7 @@ if (Get-ChildItem -LiteralPath $env:TEST_SETUP_TEMP -Filter '*.part') { throw 'P
 
 def test_setup_scripts_parse_in_windows_powershell(powershell):
     powershell("""
-foreach ($relative in @('setup.ps1', 'tools/setup_anki.ps1', 'tools/setup_helpers.ps1')) {
+foreach ($relative in @('setup.ps1', 'tools/setup/setup_anki.ps1', 'tools/setup/setup_helpers.ps1')) {
     $tokens = $null
     $errors = $null
     [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $env:TEST_SETUP_ROOT $relative), [ref]$tokens, [ref]$errors) | Out-Null

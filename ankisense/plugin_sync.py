@@ -155,13 +155,17 @@ class PluginSync:
                    "media": media}
         return {**payload, "content_hash": _digest(payload)}
 
-    def catalog(self, base_url):
+    def catalog(self, base_url, document_id=None):
         """Return a full deterministic manifest; never infer client deletions."""
         base = _base_url(base_url)
         cards, excluded, cache = [], [], {}
         with export_snapshot(self.store) as reader:
+            documents = [{"id": item["id"], "title": item.get("title") or item.get("filename", item["id"])}
+                         for item in reader.all("documents")]
+            if document_id and not any(item["id"] == document_id for item in documents):
+                raise HTTPException(404, "讲义不存在，请刷新连接后重新选择。")
             for card in sorted(reader.all("cards"), key=lambda item: item["id"]):
-                if card.get("status") != "approved":
+                if card.get("status") != "approved" or (document_id and card["document_id"] != document_id):
                     continue
                 try:
                     payload = self._card(card, reader, base, cache)
@@ -170,10 +174,11 @@ class PluginSync:
                                      "reason": error.detail})
                     continue
                 cards.append({key: payload[key] for key in ("id", "version", "guid", "content_hash", "media")})
+                cards[-1]["document_id"] = card["document_id"]
                 cards[-1]["url"] = f"{base}{API_PREFIX}/cards/{quote(card['id'], safe='')}?expected_hash={payload['content_hash']}"
         manifest = {"protocol_version": PROTOCOL_VERSION, "complete": True,
                     "cards": cards, "excluded": excluded}
-        return {**manifest, "snapshot_id": _digest(manifest)}
+        return {**manifest, "snapshot_id": _digest(manifest), "documents": documents}
 
     def card(self, identifier, base_url):
         base = _base_url(base_url)

@@ -130,13 +130,15 @@ def test_failed_batch_retries_then_continues_without_manual_confirmation(client)
     assert any(i["code"] == "batch_failed" and i["pages"] == [1, 2, 3] for i in result["job"]["issues"])
 
 
-def test_unresolved_card_is_visible_without_false_automatic_approval(client):
+def test_unresolved_candidate_is_retained_in_task_without_creating_a_learning_card(client):
     client.app.state.ai.bad_quality = True
     result = wait_import(client, upload(client))
-    assert result["status"] == "completed"
+    assert result["status"] == "failed"
     cards = client.get("/api/state").json()["cards"]
-    assert len(cards) == 2
-    assert all(c["status"] == "draft" and c["auto_quality"]["issues"] and not c.get("automatic_evidence") for c in cards)
+    assert not cards
+    assert len(result["job"]["rejected_cards"]) == 2
+    assert all(c.get("draft_preview") and c.get("quality") for c in result["job"]["rejected_cards"])
+    assert result["job"]["remaining_details"]
     assert client.get("/api/export").text.count("autcard-") == 0
 
 

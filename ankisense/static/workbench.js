@@ -23,10 +23,15 @@ function updateWorkbenchPreview(card, draft) {
   const signature = workbenchPreviewSignature(draft);
   // Text entry must not download every attached picture again on each keystroke.
   if (target.dataset.signature === signature) {
-    target.querySelector(".preview-question").textContent = draft.question || "在中间写下你的问题";
+    const question = target.querySelector(".preview-question");
+    if (window.MathText) MathText.set(question, draft.question || "在中间写下你的问题");
+    else question.textContent = draft.question || "在中间写下你的问题";
     target.querySelector(".preview-card-brand .pill").textContent = draft.concept || "知识概念";
     const answer = target.querySelector(".preview-answer");
-    if (answer) answer.textContent = draft.answer || "参考答案将在这里显示";
+    if (answer) {
+      if (window.MathText) MathText.set(answer, draft.answer || "参考答案将在这里显示");
+      else answer.textContent = draft.answer || "参考答案将在这里显示";
+    }
     const source = target.querySelector(".preview-source-label");
     if (source) source.textContent = workbenchSourceLabel(card, draft);
   } else {
@@ -47,14 +52,13 @@ function workbenchPreviewContent(card, draft) {
   const backImages = draft.images.filter(image => image.side === "answer");
   const body = el("article", { class: "preview-study-card", "aria-label": back ? "卡片背面内容" : "卡片正面内容" },
     el("div", { class: "preview-card-brand" }, text("span", "AnkiSense"), badge(draft.concept || "知识概念", "green")),
-    text("p", back ? "回到依据，补全理解" : "先用自己的话回答", "preview-eyebrow"),
     text("h3", draft.question || "在中间写下你的问题", "preview-question"),
     CardImages.gallery(frontImages, app.data.media, "正面配图"));
   if (back) {
     body.append(el("hr", { class: "section-divider" }), text("p", "参考答案", "preview-eyebrow"), text("p", draft.answer || "参考答案将在这里显示", "preview-answer"), CardImages.gallery(backImages, app.data.media, "背面配图"));
     body.append(text("p", workbenchSourceLabel(card, draft), "preview-source-label"));
   } else body.append(text("div", "用自己的话回答…", "preview-answer-placeholder"));
-  return el("div", {}, body, text("p", `正面 ${frontImages.length} 张图 · 背面 ${backImages.length} 张图`, "helper preview-image-count"), text("p", "这里预览正在编辑的内容；练习与导出使用已保存、审核通过的版本。", "helper"));
+  return el("div", {}, body, draft.images.length ? text("p", `正面 ${frontImages.length} 张图 · 背面 ${backImages.length} 张图`, "helper preview-image-count") : null);
 }
 function renderWorkbenchPreview(card, draft) {
   const tabs = el("div", { class: "preview-face-tabs", "aria-label": "预览卡片正反面" });
@@ -67,7 +71,7 @@ function renderWorkbenchPreview(card, draft) {
     tab.setAttribute("aria-pressed", String((draft.previewSide || "question") === side));
     tabs.append(tab);
   }
-  const result = panel("卡片预览", "文字与配图随编辑实时更新", el("div", {}, tabs, AutoIllustration.create({ card, draft, compact: true }), el("div", { id: "card-live-preview", "data-signature": workbenchPreviewSignature(draft) }, workbenchPreviewContent(card, draft))));
+  const result = panel("卡片预览", null, el("div", {}, tabs, AutoIllustration.create({ card, draft, compact: true }), el("div", { id: "card-live-preview", "data-signature": workbenchPreviewSignature(draft) }, workbenchPreviewContent(card, draft))));
   result.classList.add("workbench-preview");
   return result;
 }
@@ -117,15 +121,14 @@ function renderWorkbenchSources(card, draft) {
   if (doc?.file_url) links.append(el("a", { href: doc.file_url, target: "_blank", rel: "noopener noreferrer", class: "btn secondary small" }, "打开原始 PDF ↗"));
   if (sourcePages.length) links.append(button(`检查第 ${pageNumber} 页原文`, () => { app.documentId = card.document_id; app.sourcePage[card.document_id] = pageNumber; setView("materials"); focusProofreader(); }, "btn secondary small"));
   content.append(links);
-  if (sourcePage && !sourcePageConfirmed(sourcePage)) content.append(text("p", "本页使用当前提取文字，可以直接制卡和自动检查，无需逐页确认。发现错误时可在原文检查中修正。", "helper"));
-  const result = panel("讲义与依据", "保留原图、原文与引用位置", content);
+  const result = panel("讲义与依据", null, content);
   result.classList.add("workbench-source");
   return result;
 }
 function renderRubricFields(card, draft, busy) {
   const points = draft.rubric.map(point => ({ ...point }));
   const save = () => { draft.rubric = points.map(point => ({ ...point })); touchCardDraft(card, draft); };
-  const content = el("div", { class: "workbench-rubric" }, text("h3", "评分要点"), text("p", "一条只检查一个要点。AI 会据此指出回答中的遗漏与矛盾。", "helper"));
+  const content = el("div", { class: "workbench-rubric" }, text("h3", "评分要点"));
   points.forEach((point, index) => {
     const input = el("textarea", { rows: "2", maxlength: "1000", required: true, value: point.text, disabled: busy, "aria-label": `评分要点 ${index + 1}` });
     input.addEventListener("input", () => { point.text = input.value; save(); });
@@ -139,7 +142,7 @@ function renderEvidenceFields(card, draft, busy) {
   const blocks = app.data.blocks.filter(block => block.document_id === card.document_id);
   const currentIds = new Set(blocksFor(card.document_id).map(block => block.block_id));
   const save = () => { draft.evidence = JSON.stringify(refs); touchCardDraft(card, draft); };
-  const content = el("div", { class: "workbench-evidence" }, text("h3", "卡片依据"), text("p", "保留支持答案的原文。引用需与讲义一致，可在左侧加入新的原文片段。", "helper"));
+  const content = el("div", { class: "workbench-evidence" }, text("h3", "卡片依据"), helpDetails("引用要求", text("p", "引用需与讲义原文一致，可从讲义栏加入。", "helper")));
   refs.forEach((ref, index) => {
     const block = blocks.find(item => item.block_id === ref.block_id);
     const quote = el("textarea", { rows: "3", maxlength: "4000", required: true, disabled: busy, value: ref.quote, "aria-label": `原文引用 ${index + 1}` });

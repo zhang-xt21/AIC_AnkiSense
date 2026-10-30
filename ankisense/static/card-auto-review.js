@@ -89,7 +89,7 @@
         const item = node("li", "");
         item.append(node("strong", "", point?.text || check.point_id || "未找到对应评分要点"));
         item.append(node("span", check.verdict === "supported" ? "passed" : "needs-review", ` · ${verdicts[check.verdict] || "需人工确认"}`));
-        const scope = { required: "本题必答", background: "额外背景，不应强制评分", uncertain: "是否必答尚不确定" };
+        const scope = { required: "本题必答", given: "题干已给，不应要求重复", background: "额外背景，不应强制评分", uncertain: "是否必答尚不确定" };
         if (check.scope) item.append(node("p", check.scope === "required" ? "helper" : "needs-review", `${scope[check.scope] || "需核对题目范围"}：${check.scope_reason || ""}`));
         if (check.exact_quote && check.block_id) {
           const proof = node("ul", "card-auto-review-rubric-proof");
@@ -118,7 +118,7 @@
   function create({ card, draft, api, run, configured = false, busy = false, checking = false, onChecked, onRead, onLocate, onStudy }) {
     const section = node("section", "card-auto-review");
     section.setAttribute("aria-label", "整卡自动审核");
-    section.append(node("h3", "", "自动检查"), node("p", "helper", "保存后自动核对题目、答案、评分要点与引文，必要时先检查配图。全部通过即可学习，有疑点时保留草稿。"));
+    section.append(node("h3", "", "自动检查"));
     const status = node("strong", "card-auto-review-status", checking ? "正在检查当前卡片…" : "正在读取机审状态…");
     status.setAttribute("role", "status");
     const detail = node("div", "card-auto-review-detail");
@@ -161,8 +161,6 @@
         if (checks) detail.append(checks);
       }
       if (!configured && !approved) detail.append(node("p", "helper", "请先在模型设置中配置云端模型，再开始自动检查。演示卡片可自行核对。"));
-      if (approved && (card.approval?.method === "machine" || card.approval_method === "automatic")) detail.append(node("p", "helper", "当前版本已自动放行。机器检查仍可能遗漏问题，你可以随时查看来源或修改后重新检查。"));
-      if (active) detail.append(node("p", "helper", "你可以继续编辑或查看其他卡片。未保存的修改不会被检查结果覆盖。"));
       const localBlock = !result?.retryable && result?.status === "needs_review" && result?.current === false && Array.isArray(result?.reasons) && result.reasons.length > 0;
       const finished = result?.current === true && !result?.retryable && !["unchecked", "queued", "running"].includes(result?.status);
       action.textContent = imaging ? "等待自动配图…" : checking || active ? "自动检查中…" : localBlock ? "先处理卡片或来源问题" : finished || approved ? "已检查当前版本" : result?.retryable ? "重试自动检查" : "检查当前卡片";

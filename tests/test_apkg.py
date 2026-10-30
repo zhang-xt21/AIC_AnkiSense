@@ -3,6 +3,7 @@
 import importlib
 import io
 import json
+import random
 import sqlite3
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -147,12 +148,101 @@ def test_damaged_or_missing_media_fails_without_a_partial_deck(client, damage, s
     assert "content-disposition" not in response.headers
 
 
-def test_apkg_has_an_aggregate_limit(client, monkeypatch):
-    from ankisense import apkg
+def test_apkg_is_a_disk_backed_download(client, monkeypatch, tmp_path):
+    module = importlib.import_module("ankisense.app")
+    original = module.build_apkg
+    destinations = []
+    def build(rows, reader, storage, destination):
+        destinations.append(destination)
+        return original(rows, reader, storage, destination)
     change(client, seed(client)[0], status="approved")
-    monkeypatch.setattr(apkg, "MAX_EXPORT_BYTES", 100)
+    monkeypatch.setattr(module, "build_apkg", build)
     response = client.get("/api/export/apkg")
-    assert response.status_code == 413
+    assert response.status_code == 200
+    assert destinations and not destinations[0].exists()
+    inspect_package(response, tmp_path)
+
+
+@pytest.mark.parametrize("endpoint", ["/api/export/apkg", "/api/export/media"])
+def test_real_archive_over_50_mib_succeeds(client, endpoint):
+    from ankisense.media import normalize_image, save_media
+    # One bounded raster copied under distinct immutable media IDs, as when
+    # several cards independently attach a full page. The archive really exceeds
+    # the old cap; no size constant or image validator is mocked.
+    pixels = random.Random(517).randbytes(1200 * 1100 * 3)
+    output = io.BytesIO()
+    with Image.frombytes("RGB", (1200, 1100), pixels) as image:
+        image.save(output, "PNG")
+    normalized = normalize_image(output.getvalue())
+    template = seed(client)[0]
+    store = client.app.state.store
+    for index in range(18):
+        asset = save_media(store, store.path.parent, normalized)
+        store.put("cards", {**template, "id": f"bulk-{index}", "status": "approved",
+                  "images": [{"media_id": asset["id"], "side": "answer", "caption": ""}]})
+    response = client.get(endpoint)
+    assert response.status_code == 200, response.text[:200] if response.status_code != 200 else ""
+    assert len(response.content) > 50 * 1024 * 1024
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.testzip() is None
+        assert len(archive.namelist()) == 20
+
+
+@pytest.mark.parametrize("endpoint", ["/api/export", "/api/export/media", "/api/export/apkg"])
+def test_export_scope_ignores_other_documents(client, endpoint, tmp_path):
+    card = change(client, seed(client)[0], status="approved")
+    store = client.app.state.store
+    original = store.get("documents", card["document_id"])
+    store.put("documents", {**original, "id": "other-document"})
+    store.put("cards", {**card, "id": "unrelated-invalid-card", "document_id": "other-document"})
+    response = client.get(endpoint, params={"document_id": card["document_id"]})
+    assert response.status_code == 200
+    assert client.get(endpoint, params={"document_id": "missing"}).status_code == 404
+    if endpoint.endswith("apkg"):
+        _, notes, *_ = inspect_package(response, tmp_path)
+        assert [note[2][0] for note in notes] == [card["id"]]
+    elif endpoint.endswith("media"):
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            assert b"unrelated-invalid-card" not in archive.read("ankisense-approved.tsv")
+    else:
+        assert "unrelated-invalid-card" not in response.text
+
+
+@pytest.mark.parametrize("endpoint,builder", [("/api/export/apkg", "build_apkg"), ("/api/export/media", "media_zip")])
+def test_disk_failure_cleans_export_before_any_download(client, monkeypatch, endpoint, builder):
+    module = importlib.import_module("ankisense.app")
+    original = module.TemporaryDirectory
+    paths = []
+    def directory(**kwargs):
+        result = original(**kwargs)
+        paths.append(result.name)
+        return result
+    def fail(*args):
+        raise OSError(28, "fixture disk full")
+    monkeypatch.setattr(module, "TemporaryDirectory", directory)
+    monkeypatch.setattr(module, builder, fail)
+    response = client.get(endpoint)
+    assert response.status_code == 507 and "磁盘" in response.json()["detail"]
+    from pathlib import Path
+    assert paths and all(not Path(path).exists() for path in paths)
+    assert "content-disposition" not in response.headers
+
+
+def test_download_disconnect_cleans_its_temporary_directory(tmp_path):
+    import asyncio
+    from pathlib import Path
+    from ankisense.downloads import ExportResponse, TemporaryDirectory
+    temporary = TemporaryDirectory(dir=tmp_path)
+    path = Path(temporary.name) / "fixture.apkg"
+    path.write_bytes(b"completed export fixture")
+    response = ExportResponse(path, temporary, filename="fixture.apkg")
+    async def receive():
+        return {"type": "http.disconnect"}
+    async def send(message):
+        raise OSError("fixture client disconnected")
+    with pytest.raises(OSError):
+        asyncio.run(response({"type": "http", "method": "GET", "headers": [], "extensions": {}}, receive, send))
+    assert not path.parent.exists()
 
 
 @pytest.mark.parametrize("endpoint", ["/api/export", "/api/export/media", "/api/export/apkg"])
@@ -225,13 +315,13 @@ def test_export_keeps_a_consistent_snapshot_when_card_is_edited(client, tmp_path
     card = change(client, seed(client)[0], status="approved")
     entered, release = Event(), Event()
 
-    def delayed(rows, reader, storage):
+    def delayed(rows, reader, storage, destination):
         saved_rows = list(rows)
         entered.set()
         assert release.wait(10)
         # The export still sees the approved version selected before the edit.
         assert reader.get("cards", card["id"])["status"] == "approved"
-        return original(saved_rows, reader, storage)
+        return original(saved_rows, reader, storage, destination)
 
     monkeypatch.setattr(module, "build_apkg", delayed)
     with ThreadPoolExecutor(max_workers=1) as pool:

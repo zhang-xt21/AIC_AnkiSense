@@ -1,7 +1,7 @@
 """Attach one verified lecture figure without blocking useful text cards.
 
-The service reuses local recommendation/page caches and the saved-picture
-review policy. It never substitutes a whole page or retries a cloud request.
+The service prepares cited pages for explicit crop selection. It never
+adds a whole page or calls a model merely to locate a picture.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .figure_recommendations import _now
 from .figure_vision import _digest
-from .schemas import ImageRecommendationAdoptRequest, ImageRecommendationRequest
+from .schemas import ImageRecommendationRequest
 from .sources import page_id, source_available
 
 
@@ -95,7 +95,7 @@ class AutomaticIllustrationService:
                 return await self.review_saved_card(latest)
             if self.closing:
                 return await self._update(latest["id"], snapshot, token, "interrupted", "服务正在关闭，未开始自动配图。")
-            latest = await self._update(latest["id"], snapshot, token, "queued", "正在等待匹配引用页中的讲义图片。")
+            latest = await self._update(latest["id"], snapshot, token, "queued", "正在等待引用页原图。")
             if need == "helpful":
                 # Queueing text review does not wait for a model result. Its
                 # eventual metadata-only approval must not invalidate matching.
@@ -125,7 +125,7 @@ class AutomaticIllustrationService:
                 if self.closing:
                     await self._update(card_id, snapshot, token, "interrupted", "服务已关闭，未开始匹配；可主动重试。")
                     return
-                card = await self._update(card_id, snapshot, token, "matching", "正在本机匹配引用页中的讲义图片。")
+                card = await self._update(card_id, snapshot, token, "matching", "正在准备引用页原图。")
                 try:
                     public = await self.recommendations.start(card_id, ImageRecommendationRequest(card_version=card["version"]))
                 except HTTPException as error:
@@ -145,57 +145,8 @@ class AutomaticIllustrationService:
                 if public["status"] != "completed":
                     await self._update(card_id, snapshot, token, "failed", public.get("message") or "本地配图匹配失败，可主动重试。", job_id=job_id)
                     return
-                job = self.store.get("figure_jobs", job_id)
-                intended_ids = set((card.get("image_intent") or {}).get("block_ids") or [])
-                cited_ids = {item["block_id"] for item in card.get("evidence", [])}
-                intended_pages = {(self.store.get("blocks", identifier) or {}).get("page")
-                                  for identifier in intended_ids & cited_ids}
-                pictures = [candidate for candidate in job.get("candidates", [])
-                            if candidate.get("kind") == "picture" and candidate.get("page") in intended_pages]
-                if job.get("parser_failed") or job.get("warning"):
-                    reason = job.get("warning") or job.get("message") or "图块解析存在提示。"
-                    await self._update(card_id, snapshot, token, "needs_review",
-                                       f"{reason} 未自动添加图片；可查看推荐后手动选图。", job_id=job_id)
-                    return
-                if not pictures:
-                    await self._update(card_id, snapshot, token, "not_found", "引用页没有找到合适的独立图块。", job_id=job_id)
-                    return
-                if len(pictures) != 1 or pictures[0].get("quality_flags"):
-                    await self._update(card_id, snapshot, token, "needs_review", "存在多个候选图或裁剪疑点，未自动选图；可到制卡工作台确认。", job_id=job_id)
-                    return
-                if self.closing:
-                    await self._update(card_id, snapshot, token, "interrupted", "服务已关闭，未发起图片检查；可主动重试。", job_id=job_id)
-                    return
-                candidate = pictures[0]
-                media = await self.recommendations.adopt(card_id, ImageRecommendationAdoptRequest(
-                    card_version=card["version"], job_id=job_id, candidate_id=candidate["id"]))
-                await self._update(card_id, snapshot, token, "checking", "正在检查图片与卡片的关联、完整性和答案泄露。", job_id=job_id)
-                if self.closing:
-                    await self._update(card_id, snapshot, token, "interrupted", "服务已关闭，未发起图片检查；可主动重试。", job_id=job_id)
-                    return
-                side = "question" if need == "required" else "answer"
-                attachment = {"media_id": media["id"], "side": side, "caption": f"讲义第 {candidate['page']} 页"}
-                metadata = {"state": "attached", "message": "已添加通过检查的讲义配图，等待整卡检查。",
-                            "updated_at": _now(), "card_version": card["version"] + 1, "task_id": token,
-                            "job_id": job_id, "media_id": media["id"], "page": candidate["page"], "side": side}
-                result = await self.image_auto_review.check_candidate(card_id, attachment, card["version"], metadata=metadata,
-                                                                       should_continue=lambda: not self.closing)
-                if result.get("attached"):
-                    if not self.closing:
-                        await self.review_saved_card(result["card"])
-                    else:
-                        def interrupted_review():
-                            current = self.store.get("cards", card_id)
-                            if not current or current["version"] != result["card"]["version"]:
-                                return []
-                            current["review_state"] = "interrupted"
-                            current["auto_illustration"]["message"] = "配图已添加；整卡检查因服务关闭未开始，可重新机审。"
-                            return [("cards", current)]
-                        await asyncio.to_thread(self.store.mutate, interrupted_review)
-                    return
-                state = "interrupted" if result.get("interrupted") else "failed" if result.get("retryable") else "needs_review"
-                message = "；".join(result.get("reasons") or ["图片检查尚未通过，未自动附图。"])
-                await self._update(card_id, snapshot, token, state, message, job_id=job_id)
+                await self._update(card_id, snapshot, token, "needs_review",
+                                   "引用页原图已准备，可在配图区裁剪后加入卡片。", job_id=job_id)
         except HTTPException as error:
             if error.status_code == 409:
                 await self._mark_stale(card_id, token)

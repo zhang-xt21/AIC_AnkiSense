@@ -9,7 +9,7 @@ if (-not $PSBoundParameters.ContainsKey('AnkiRoot')) {
     if (Test-Path -LiteralPath $runtimeFile) {
         $runtime = Get-Content -LiteralPath $runtimeFile -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($runtime.schema_version -ne 1 -or -not ($runtime.anki_root -is [string]) -or -not $runtime.anki_root) {
-            throw 'Invalid local Anki runtime configuration. Rerun tools/setup_anki.ps1 -AnkiRoot with the program directory.'
+            throw 'Invalid local Anki runtime configuration. Rerun tools/setup/setup_anki.ps1 -AnkiRoot with the program directory.'
         }
         $AnkiRoot = $runtime.anki_root
     }

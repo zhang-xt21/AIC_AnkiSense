@@ -1,6 +1,6 @@
 {
   "name": "ankisense-desktop",
-  "version": "0.1.4",
+  "version": "0.1.19",
   "private": true,
   "description": "Electron thin shell for the AnkiSense web app",
   "author": "AnkiSense Team",
@@ -29,7 +29,8 @@
       "main.js",
       "preload.js",
       "backend-health.cjs",
-      "anki-integration.cjs"
+      "anki-integration.cjs",
+      "anki-window.cjs"
     ],
     "extraResources": [
       {
@@ -53,5 +54,6 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     }
-  }
+  },
+  "license": "AGPL-3.0-only"
 }

@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import io
+import random
 from pathlib import Path
 
 import pytest
@@ -143,17 +144,90 @@ def test_duplicate_manifest_entries_fail(source):
         transport.prepare_bundle("unused", "profile-001")
 
 
-def test_card_count_limit_is_explicit(source, monkeypatch):
-    monkeypatch.setattr(transport, "MAX_CARDS", 0)
-    with pytest.raises(PluginError, match="单次最多"):
-        transport.prepare_bundle("unused", "profile-001")
-
-
-def test_batch_image_memory_bound(source, monkeypatch):
+def test_an_individual_card_is_still_transferred_when_batch_target_is_small(source, monkeypatch):
     monkeypatch.setattr(transport, "MAX_BATCH_MEDIA", 1)
-    with pytest.raises(PluginError, match="超过 64 MB"):
-        transport.prepare_bundle("unused", "profile-001")
-    assert "media" not in source.calls
+    bundle = transport.SyncSession("unused", "profile-001").next_bundle()
+    assert len(bundle["cards"]) == 1 and bundle["media"]
+
+
+def test_verified_local_media_is_not_downloaded(source):
+    asset = source.detail["media"][0]
+    bundle = transport.SyncSession("unused", "profile-001").next_bundle({"media": {asset["filename"]: asset["sha256"]}})
+    assert bundle["cards"] and bundle["media"] == {} and "media" not in source.calls
+
+
+def test_unchanged_notes_are_not_downloaded(source):
+    bundle = transport.SyncSession("unused", "profile-001").next_bundle({"unchanged_ids": [source.detail["id"]]})
+    assert bundle["skipped_unchanged"] == 1 and bundle["cards"] == []
+    assert "card" not in source.calls and "media" not in source.calls
+
+
+def populate(source, count, media_bytes=None):
+    details, images = {}, {}
+    for index in range(count):
+        card = copy.deepcopy(source.detail)
+        card["id"], card["guid"] = f"bulk-{index}", f"bulk-guid-{index}"
+        card["fields"]["NoteID"] = card["id"]
+        if media_bytes is not None:
+            asset = card["media"][0]
+            asset["id"] = "img-" + f"{index:032x}"
+            asset["filename"] = "ankisense-" + asset["id"] + ".png"
+            asset["size_bytes"] = len(media_bytes)
+            asset["sha256"] = hashlib.sha256(media_bytes).hexdigest()
+            images[asset["id"]] = media_bytes
+        else:
+            card["media"] = []
+        card["content_hash"] = transport._digest({key: value for key, value in card.items() if key != "content_hash"})
+        details[card["id"]] = card
+    source.catalog_value["cards"] = [{key: copy.deepcopy(card[key]) for key in
+        ("id", "version", "guid", "content_hash", "media")} for card in details.values()]
+    source.catalog_value["snapshot_id"] = transport._digest({key: source.catalog_value[key]
+        for key in ("protocol_version", "complete", "cards", "excluded")})
+    source.card = lambda identifier, expected_hash=None: copy.deepcopy(details[identifier])
+    source.media = lambda identifier, digest: images[identifier]
+
+
+def test_more_than_500_cards_are_partitioned_without_loss(source):
+    populate(source, 503)
+    session = transport.SyncSession("unused", "profile-001")
+    identifiers = []
+    while session.has_more:
+        bundle = session.next_bundle()
+        assert len(bundle["cards"]) <= transport.MAX_CARDS
+        identifiers.extend(card["id"] for card in bundle["cards"])
+        assert len(bundle["catalog_ids"]) == 503
+    assert len(identifiers) == len(set(identifiers)) == 503
+
+
+def test_more_than_64_mib_of_images_is_partitioned(source):
+    output = io.BytesIO()
+    with Image.frombytes("RGB", (1200, 1100), random.Random(64).randbytes(1200 * 1100 * 3)) as image:
+        image.save(output, "PNG")
+    png = normalize_image(output.getvalue())[0]
+    populate(source, 18, png)
+    session = transport.SyncSession("unused", "profile-001")
+    total, cards, batches = 0, 0, 0
+    while session.has_more:
+        bundle = session.next_bundle()
+        size = sum(len(content) for content in bundle["media"].values())
+        assert size <= transport.MAX_BATCH_MEDIA
+        total += size
+        cards += len(bundle["cards"])
+        batches += 1
+    assert total > 64 * 1024 * 1024 and cards == 18 and batches > 1
+
+
+def test_scoped_session_preserves_selection_for_final_validation(source):
+    scopes = []
+    original = source.catalog
+    def catalog(document_id=None):
+        scopes.append(document_id)
+        return original()
+    source.catalog = catalog
+    session = transport.SyncSession("unused", "profile-001", "document-one")
+    bundle = session.next_bundle()
+    assert scopes == ["document-one", "document-one"]
+    assert bundle["scope_document_id"] == "document-one"
 
 
 def test_vendored_client_matches_tested_example():

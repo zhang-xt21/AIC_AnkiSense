@@ -136,6 +136,14 @@ class Store:
             if check:
                 check()
             records = build_records()
+            # A completed background callback must never resurrect a deleted card.
+            deleted = {row[0] for row in connection.execute("SELECT id FROM records WHERE collection='deleted_cards'")}
+            records = [(collection, record) for collection, record in records
+                       if not (collection == "cards" and record.get("id") in deleted)
+                       and not (record.get("card_id") in deleted)]
+            records = [(collection, {**record, "card_ids": [identifier for identifier in record["card_ids"] if identifier not in deleted]}
+                        if collection in {"auto_card_jobs", "generation_jobs"} and "card_ids" in record else record)
+                       for collection, record in records]
             connection.executemany(
                 "INSERT INTO records(collection,id,payload) VALUES(?,?,?) ON CONFLICT(collection,id) DO UPDATE SET payload=excluded.payload",
                 [(collection, record.get("id", record.get("block_id")), json.dumps(record, ensure_ascii=False)) for collection, record in records],

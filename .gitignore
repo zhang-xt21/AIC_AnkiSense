@@ -1,5 +1,4 @@
 .venv/
-.venv-docling/
 .env
 .env.*
 !.env.example
@@ -16,7 +15,8 @@ __pycache__/
 node_modules/
 .local/
 dist/
-build/
+/build/
+/desktop/build/
 test_ppt/
 origin/Anki/
 origin/AnkiData/
@@ -25,7 +25,6 @@ origin/anki-runtime.json
 origin/*.lnk
 **/classifier-models/
 **/ocr-models/
-**/docling-models/
 *.sqlite
 *.sqlite3
 *.sqlite3-*

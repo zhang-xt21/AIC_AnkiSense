@@ -10,7 +10,7 @@
     if (!card || !draft || draft.dirty || draft.version !== card.version) return false;
     const saved = (card.images || []).find(item => item.media_id === reference?.media_id);
     if (!saved || saved.side !== reference.side || saved.caption !== reference.caption) return false;
-    return media?.source?.origin === "figure_recommendation";
+    return ["figure_recommendation", "automatic_source_page"].includes(media?.source?.origin);
   }
 
   function eligibleImages(card, draft, media) {
@@ -20,7 +20,7 @@
 
   function labelFor(result) {
     if (result?.stale || (result?.current === false && result?.review_id)) return "检查结果已失效";
-    return ({ auto_pass: "配图机审通过", attention: "建议重裁或更换", needs_review: "配图待处理", unchecked: "尚未检查" })[result?.status] || "尚未检查";
+    return ({ auto_pass: "配图机审通过", attention: "建议重裁或更换", needs_review: "配图待核对", unchecked: "尚未检查" })[result?.status] || "尚未检查";
   }
 
   function endpoint(card, reference) {
@@ -50,7 +50,7 @@
   function create({ card, draft, reference, media, vision, api, busy = false }) {
     const section = node("section", "image-auto-review");
     section.setAttribute("aria-label", "配图自动审核");
-    if (media?.source?.origin !== "figure_recommendation") {
+    if (!["figure_recommendation", "automatic_source_page"].includes(media?.source?.origin)) {
       section.append(node("p", "helper", "手动添加的配图需要对照原图核对。"));
       return section;
     }
@@ -80,6 +80,9 @@
       detail.replaceChildren();
       if (error) detail.append(node("p", "inline-error", error));
       else for (const reason of (result?.reasons || []).slice(0, 4)) detail.append(node("p", "helper", reason));
+      if (result?.stale) detail.append(node("p", "helper", "审核规则、卡片或来源已更新，请重新检查当前版本。"));
+      if (result?.status === "needs_review" && result.current === true && !result.retryable) detail.append(node("p", "helper", "本次检查已完成，仍有疑点需要人工核对。"));
+      detail.append(node("p", "helper", reference.side === "answer" ? "答案侧允许包含答案文字；仍须满足来源、相关性、完整性和清晰度要求。" : "题目侧配图还须避免提前泄露答案。"));
       if (!vision?.available) detail.append(node("p", "helper", vision?.message || "请配置支持图片输入的模型。"));
       if (result?.status === "auto_pass") detail.append(node("p", "helper", "仅代表这张配图通过机器筛查；题目与答案仍按卡片审核状态处理。"));
       const localBlock = result?.current === false && result?.status === "needs_review";

@@ -24,6 +24,7 @@ from .ui import PATH_KEY, _client_id
 COMMAND = "ankisense:answer"
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _ID = re.compile(r"[a-zA-Z0-9_-]{1,100}\Z")
+_CLASS = re.compile(r'''(?:^|\s)class\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))''', re.I)
 _registered = False
 
 
@@ -590,17 +591,42 @@ def _card_will_show(text, card, kind):
             return text
     except (AttributeError, RuntimeError):
         return text
+    hint = "在 Anki 内输入回答；分析需要本机 AnkiSense 服务运行。"
     try:
-        # APKG-only cards have no add-on sync mapping; keep their existing
-        # browser link functional until the user explicitly syncs them.
         _review_context(aqt.mw, card)
-    except (AnswerUnavailable, AttributeError):
-        return text
-    # The unchanged card template remains usable without this add-on. During
-    # Anki review only, the existing button opens a native dialog instead.
-    return re.sub(r'(<a\s+class="as-practice"\s+)href="[^"]*"',
-                  lambda match: match.group(1) + 'href="#" onclick="pycmd(\'ankisense:answer\'); return false;"',
-                  text, count=1)
+    except AnswerUnavailable as error:
+        # Keep the action inside Anki and explain the missing association.
+        # The dialog validates again before any request; do not silently send
+        # the user to a browser when pairing or note validation fails.
+        hint = str(error)
+    except AttributeError:
+        hint = "请在当前 Anki 资料中重新打开卡片，并检查 AnkiSense 同步连接。"
+
+    def has_class(attributes, name):
+        match = _CLASS.search(attributes)
+        return bool(match and name in html.unescape(next(value for value in match.groups() if value is not None)).split())
+
+    replaced = False
+    def native_action(match):
+        nonlocal replaced
+        if not has_class(match.group("attrs"), "as-practice"):
+            return match.group(0)
+        replaced = True
+        return ('<button type="button" class="as-practice" '
+                'style="border:0;font-family:inherit;cursor:pointer" '
+                'onclick="pycmd(\'ankisense:answer\'); return false;">在 Anki 内作答</button>')
+
+    # Only the reviewer display changes. The stored template still works in
+    # Anki clients without this add-on, including APKG exports and mobile apps.
+    text = re.sub(r'<a\b(?P<attrs>[^>]*)>.*?</a\s*>', native_action, text, flags=re.I | re.S)
+    if replaced:
+        def native_hint(match):
+            if (has_class(match.group("attrs"), "as-hint")
+                    and _plain(match.group("body")) == "在这台电脑上启动 AnkiSense 后可打开练习。"):
+                return '<p class="as-hint">' + html.escape(hint) + '</p>'
+            return match.group(0)
+        text = re.sub(r'<p\b(?P<attrs>[^>]*)>(?P<body>.*?)</p\s*>', native_hint, text, flags=re.I | re.S)
+    return text
 
 
 def _receive_js_message(handled, message, context):

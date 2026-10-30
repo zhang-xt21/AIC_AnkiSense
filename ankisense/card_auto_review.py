@@ -20,6 +20,8 @@ from .model_policy import generation_options
 from .prompts import CARD_REVIEW_PROMPT_VERSION
 from .schemas import CardDraft, CardReviewInput, SourceBlock
 from .sources import page_id, source_available
+from .learning_policy import non_learning_reason, unasked_expression_requirement, question_context_reason, multiple_target_reason
+from .reference_check import reference_answer_passes, minimal_answer_passes
 
 
 POLICY_VERSION = MACHINE_APPROVAL_POLICY
@@ -343,6 +345,18 @@ class CardAutoReviewService:
                 return await self._save(captured, "needs_review", ["自动检查未完成，请重试或处理卡片。"], None, [], retryable=True)
 
     async def _run(self, captured: dict):
+        learning_reason = non_learning_reason(captured["draft"].concept, captured["draft"].question)
+        if learning_reason:
+            return await self._save(captured, "attention", [learning_reason], None, [learning_reason], retryable=False)
+        context_reason = question_context_reason(captured["draft"])
+        if context_reason:
+            return await self._save(captured, "attention", [context_reason], None, [context_reason], retryable=False)
+        target_reason = multiple_target_reason(captured["draft"])
+        if target_reason:
+            return await self._save(captured, "attention", [target_reason], None, [target_reason], retryable=False)
+        expression_reason = unasked_expression_requirement(captured["draft"])
+        if expression_reason:
+            return await self._save(captured, "attention", [expression_reason], None, [expression_reason], retryable=False)
         try:
             draft = captured["draft"]
             if captured["image_bindings"]:
@@ -371,25 +385,50 @@ class CardAutoReviewService:
                          and not checks["missing_question_parts"]
                          and all(item["scope"] == "required" for item in checks["rubric_checks"])
                          and all(item["verdict"] == "supported" for item in checks["rubric_checks"]))
+        reference = None
+        minimal_check = None
         if all_supported:
+            try:
+                diagnosis = await self.ai_provider().diagnose_answer(captured["draft"], captured["blocks"], captured["draft"].answer)
+                reference = diagnosis.model_dump()
+            except AIError:
+                return await self._save(captured, "needs_review", ["参考答案自测未完成，请重试。"], checks, [], retryable=True)
+            if not reference_answer_passes(reference, captured["draft"], captured["blocks"]):
+                reason = "参考答案自测未满足全部评分点，请核对题干已给条件与必答评分点。"
+                return await self._save(captured, "attention", [reason], checks, [reason], retryable=False,
+                                        reference_answer_check=reference)
+            try:
+                answer = await self.ai_provider().minimal_answer_for_question(captured["draft"], captured["blocks"])
+                diagnosis = await self.ai_provider().diagnose_answer(captured["draft"], captured["blocks"], answer)
+                minimal_check = {"answer": answer, "diagnosis": diagnosis.model_dump()}
+            except AIError:
+                return await self._save(captured, "needs_review", ["独立最短答案检查未完成，请重试。"], checks, [],
+                                        retryable=True, reference_answer_check=reference)
+            if not minimal_answer_passes(minimal_check, captured["draft"], captured["blocks"]):
+                reason = "独立最短答案未满足评分点；题目范围或评分点可能多要求，请重新审核。"
+                return await self._save(captured, "attention", [reason], checks, [reason], retryable=False,
+                                        reference_answer_check=reference, minimal_answer_check=minimal_check)
             status = "auto_pass"
-            reasons = ["题目、答案和全部评分要点均获得当前引用的逐字证据，评分条件与题目要求一致。"
+            reasons = ["题目、答案和全部评分要点均获得当前引用的逐字证据，参考答案已通过诊断一致性自测。"
                        + ("配图也已分别通过机审。" if captured["image_bindings"] else "")]
         elif (checks["decision"] == "revise" or any(item["verdict"] == "contradicted" for item in checks["rubric_checks"])
               or checks["unsupported_claims"] or checks["question_coverage"] == "incomplete"
-              or any(item["scope"] == "background" for item in checks["rubric_checks"])):
+              or any(item["scope"] in {"given", "background"} for item in checks["rubric_checks"])):
             status = "attention"
             reasons = checks["issues"] or checks["unsupported_claims"] or ["卡片内容需要修正。"]
         else:
             status = "needs_review"
             reasons = checks["issues"] or ["题目、答案或引用的支持关系仍不确定，请人工核对。"]
-        return await self._save(captured, status, reasons, checks, checks["issues"], retryable=False)
+        return await self._save(captured, status, reasons, checks, checks["issues"], retryable=False,
+                                        reference_answer_check=reference, minimal_answer_check=minimal_check)
 
-    async def _save(self, captured, status, reasons, checks, issues, *, retryable):
+    async def _save(self, captured, status, reasons, checks, issues, *, retryable, reference_answer_check=None, minimal_answer_check=None):
         record = {"id": captured["review_id"], "review_id": captured["review_id"],
                   "fingerprint": captured["fingerprint"], "card_id": captured["card"]["id"],
                   "card_version": captured["card"]["version"], "status": status,
                   "reasons": reasons, "checks": checks, "issues": issues, "checked_at": _now(),
+                  "reference_answer_check": reference_answer_check,
+                  "minimal_answer_check": minimal_answer_check,
                   "retryable": retryable, "policy_version": POLICY_VERSION,
                   "prompt_version": CARD_REVIEW_PROMPT_VERSION, "model": self.settings.model,
                   "pdf_hash": captured["pdf_hash"], "image_bindings": captured["image_bindings"],

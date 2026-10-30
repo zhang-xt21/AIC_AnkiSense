@@ -35,6 +35,11 @@ const STYLE = `
   height: 0 !important;
 }
 .ankisense-electron .topbar { -webkit-app-region: drag; justify-content: flex-start; position: sticky; top: 0; z-index: 1000; background: #ffffff; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06); }
+/* Native drag hit regions can cover top-layer dialog controls on Windows.
+   Suspend the title bar region for the modal's lifetime, including tall crops. */
+.ankisense-electron:has(dialog[open]) .topbar { -webkit-app-region: no-drag; }
+.ankisense-electron dialog,
+.ankisense-electron dialog * { -webkit-app-region: no-drag; }
 .ankisense-electron .mode-badge { margin-left: auto; }
 .ankisense-electron .window-controls {
   -webkit-app-region: no-drag;

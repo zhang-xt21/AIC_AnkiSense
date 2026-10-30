@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
-from .schemas import CardDraft, Evidence, StrictModel
+from .schemas import CardDraft, Diagnosis, Evidence, StrictModel
 
 
 class KnowledgePoint(StrictModel):
@@ -52,6 +52,10 @@ QualityIssueCode = Literal[
     "duplicate_card",
     "source_conflict",
     "insufficient_evidence",
+    "irrelevant_content",
+    "reference_answer_mismatch",
+    "review_protocol_error",
+    "minimal_answer_mismatch",
 ]
 
 
@@ -70,6 +74,8 @@ class CardQualityReport(StrictModel):
     # New visual reviews retain the independently validated whole-card checks.
     # Older quality receipts remain readable without claiming this extra check.
     review_checks: dict | None = None
+    reference_answer_check: Diagnosis | None = None
+    minimal_answer_check: dict | None = None
 
     @model_validator(mode="after")
     def consistent_verdict(self):

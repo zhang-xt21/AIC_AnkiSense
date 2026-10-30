@@ -35,7 +35,7 @@
     section.refreshIllustration = () => {
       const view = describe(card);
       const stale = draft && draft.version !== card.version;
-      section.hidden = !view && !stale;
+      section.hidden = (!view && !stale) || (compact && !stale && !active(card) && !view?.attention);
       section.classList.toggle("attention", Boolean(view?.attention));
       title.textContent = view?.label || "卡片已更新";
       message.textContent = view?.message || "";

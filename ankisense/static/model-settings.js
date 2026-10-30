@@ -38,7 +38,7 @@
     panel.setAttribute("aria-labelledby", title.id);
     const header = node("div", "panel-header");
     const headerText = node("div");
-    headerText.append(title, node("div", "meta", "为卡片生成与回答分析选择运行方式。"));
+    headerText.append(title);
     const badge = node("span", "pill", "读取中");
     header.append(headerText, badge);
     const body = node("div", "panel-body");
@@ -60,9 +60,9 @@
     modeGroup.append(node("legend", "", "运行模式"));
     const modes = {};
     const modeOptions = node("div", "model-settings-mode-options");
-    for (const [value, label, description] of [
-      ["demo", "演示模式", "使用本地规则，先体验学习流程"],
-      ["cloud", "自配 API", "使用你选择的服务商与模型"]
+    for (const [value, label] of [
+      ["demo", "演示模式"],
+      ["cloud", "自配 API"]
     ]) {
       const option = node("label", "model-settings-mode-option");
       const radio = node("input");
@@ -70,7 +70,7 @@
       radio.name = `${prefix}-mode`;
       radio.value = value;
       const copy = node("span");
-      copy.append(node("strong", "", label), node("span", "helper", description));
+      copy.append(node("strong", "", label));
       option.append(radio, copy);
       modeOptions.append(option);
       modes[value] = radio;
@@ -122,8 +122,8 @@
     const clearKeyLabel = node("label", "model-settings-clear-key");
     clearKeyLabel.append(clearKey, node("span", "", "保存时清除已保存的密钥"));
     connection.append(
-      field("API 地址", baseUrl, "填写兼容 Chat Completions 的 Base URL，不包含 /chat/completions。更换服务器时，请重新填写密钥或勾选清除旧密钥。"),
-      field("模型名称", model, "按服务商提供的名称填写。图片检查还需要模型支持图片输入。"),
+      field("API 地址", baseUrl, "填写 API Base URL，不填官网网址或 /chat/completions。"),
+      field("模型名称", model),
       keyField, clearKeyLabel
     );
     const advanced = node("details", "model-settings-advanced");
@@ -136,19 +136,20 @@
     timeout.step = "any";
     timeout.required = true;
     timeout.addEventListener("invalid", () => { advanced.open = true; });
-    advanced.append(field("请求超时（秒）", timeout, "可设置 1–180 秒。模型响应较慢时，可适当增加等待时间。"));
-    const storageNote = node("p", "helper model-settings-storage", "配置与密钥保存在本机配置文件中，不写入浏览器存储，读取设置时不会返回密钥。仅保存配置不会验证连通性；若勾选继续当前制卡，保存后会自动续跑任务。");
+    advanced.append(field("请求超时（秒）", timeout, "1–180 秒"));
+    const storageNote = node("p", "helper model-settings-storage", "配置与密钥保存在本机，读取设置时不返回密钥。更换服务器需重新填写密钥；保存设置不会验证连接。");
+    advanced.append(storageNote, node("p", "helper", "继续制卡会停止旧请求，用新配置处理未完成部分，保留已有卡片；不会重启已结束或手动取消的任务。"));
     const resumeJobs = node("input");
     resumeJobs.type = "checkbox"; resumeJobs.name = "resume_active_jobs"; resumeJobs.checked = true;
     const resumeLabel = node("label", "model-settings-clear-key");
     resumeLabel.append(resumeJobs, node("span", "", "保存后用新模型继续当前制卡"));
-    const resumeHint = node("p", "helper", "若当前有制卡任务，先停止旧请求，再用新配置继续未完成部分，已生成卡片保留。续跑会把所需原文与原页发送给新配置的模型并消耗额度；不会重启以前已结束或手动取消的任务。");
+    const resumeHint = node("p", "helper model-settings-resume-hint", "续跑保留已有卡片，会向新模型发送所需原文、原页并消耗额度。");
     const save = node("button", "btn", "保存设置");
     save.type = "submit";
     const test = node("button", "btn secondary", "验证连接");
     test.type = "button";
     const testHint = node("span", "helper");
-    const testNote = node("p", "helper model-settings-test-note", "验证会向已保存的服务商发送一次固定的简短测试文本，消耗少量 API 额度；不会发送讲义、卡片或回答。仅检查文字请求与 JSON 输出，图片能力需另行确认。");
+    const testNote = node("p", "helper model-settings-test-note", "验证仅发送简短测试文字并消耗少量额度，不含学习材料；通过不代表支持图片。");
     const connectionResult = node("div", "notice model-settings-test-result");
     connectionResult.setAttribute("role", "status");
     connectionResult.setAttribute("aria-live", "polite");
@@ -157,7 +158,7 @@
     let connectionPoll;
     const actions = node("div", "model-settings-actions");
     actions.append(save, test, testHint);
-    controls.append(modeGroup, modeHint, connection, advanced, storageNote, resumeLabel, resumeHint, actions, testNote, connectionResult);
+    controls.append(modeGroup, modeHint, connection, advanced, resumeLabel, resumeHint, actions, testNote, connectionResult);
     form.append(controls);
     body.append(loading, error, retry, feedback, form);
     panel.append(header, body);
@@ -174,7 +175,7 @@
       test.disabled = busy || dirty || savedSettings?.mode !== "cloud" || !savedSettings?.configured || connectionState.status === "testing";
       testHint.textContent = dirty ? "修改后请先保存，再验证连接。"
         : savedSettings?.mode !== "cloud" ? "演示模式无需验证连接。"
-          : !savedSettings?.configured ? "请先补全并保存 API 地址、模型和密钥。" : "验证已保存的模型配置。";
+          : !savedSettings?.configured ? "请先补全并保存配置。" : "";
     }
     function showConnection(value, followPending = false) {
       clearTimeout(connectionPoll);
@@ -203,8 +204,8 @@
     }
     function updateModeHint() {
       modeHint.textContent = modes.cloud.checked
-        ? "云端模式会向你配置的服务商发送相关原文与回答；主动检查配图时，还会发送所选图片及原页。"
-        : "演示模式使用本地规则，不调用模型。你也可以先保存服务商配置，之后再切换到自配 API。";
+        ? "学习所需文字、原页及配图会发送至所选服务商，消耗 API 额度。"
+        : "使用本地规则，不调用模型。";
     }
     function updateKeyState() {
       let changedServer = false;

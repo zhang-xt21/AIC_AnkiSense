@@ -58,6 +58,14 @@ def validate_quality_report(
     if report.verdict == "clear":
         if report.issues or supported != point_ids:
             raise ValueError("无疑点结论必须确认所有评分要点得到原文支持。")
+        if report.reference_answer_check is not None:
+            from .reference_check import reference_answer_passes
+            if not reference_answer_passes(report.reference_answer_check, card, blocks):
+                raise ValueError("参考答案自测未通过时不能自动放行。")
+        if report.minimal_answer_check is not None:
+            from .reference_check import minimal_answer_passes
+            if not minimal_answer_passes(report.minimal_answer_check, card, blocks):
+                raise ValueError("独立最短答案未满足评分点时不能自动放行。")
     elif report.verdict != "needs_review" or not report.issues:
         raise ValueError("待审核结论必须说明质量疑点。")
 

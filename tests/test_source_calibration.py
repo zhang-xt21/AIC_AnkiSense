@@ -81,7 +81,7 @@ def current(client, doc):
 
 
 def test_fixed_policy_cases():
-    from tools.evaluate_source_calibration import policy_cases
+    from tools.evaluation.evaluate_source_calibration import policy_cases
     result = policy_cases()
     assert result["real_model_accuracy"] is None
     assert len(result["results"]) == 10

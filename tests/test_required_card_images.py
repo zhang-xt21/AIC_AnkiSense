@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from ankisense.approval import card_binding_hash, require_required_image, valid_machine_approval
 from ankisense.plugin_sync import PluginSync
 from ankisense.schemas import Diagnosis
-from test_card_auto_review import bind_imported_pdf, good_review, post, ready
+from test_card_auto_review import bind_imported_pdf, good_review, post, ready, minimal_answer_fixture
 from test_figure_recommendations import context
 from test_image_auto_review import GOOD, saved
 
@@ -47,6 +47,7 @@ def required_picture(saved, monkeypatch):
 
     monkeypatch.setattr(client.app.state.ai, "review_card", review)
     monkeypatch.setattr(client.app.state.ai, "diagnose_answer", diagnose)
+    monkeypatch.setattr(client.app.state.ai, "minimal_answer_for_question", minimal_answer_fixture)
     return client, card, media, service, image_calls, text_calls
 
 

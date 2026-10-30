@@ -151,8 +151,8 @@ test("approved images keep APKG primary and expose secondary TSV and media ZIP d
   const buttons = h.buttons();
   assert.match(buttons[0].textContent, /1 张卡片.*APKG/);
   assert.doesNotMatch(buttons[0].className, /secondary/);
-  assert.match(h.page.textContent, /其中 1 张带配图/);
-  const formats = h.find(node => node.tagName === "details")[0];
+  assert.match(h.page.textContent, /含 1 张图文卡片/);
+  const formats = h.find(node => node.tagName === "details" && node.className.includes("export-alternatives"))[0];
   assert.equal(formats.getAttribute("open"), null, "alternative instructions start collapsed");
   const tsv = buttons.find(node => node.textContent === "下载纯文本 TSV");
   const zip = buttons.find(node => node.textContent === "下载图文 ZIP");

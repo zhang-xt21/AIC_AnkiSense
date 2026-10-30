@@ -1,17 +1,14 @@
 param(
     [string]$Python = '',
     [switch]$IncludeBrowserTests,
-    [switch]$IncludeDocling,
-    [switch]$SkipDoclingModels,
     [switch]$IncludeAnki,
     [string]$AnkiRoot = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-. (Join-Path $PSScriptRoot 'tools\setup_helpers.ps1')
+. (Join-Path $PSScriptRoot 'tools\setup\setup_helpers.ps1')
 if ($env:OS -ne 'Windows_NT') { throw 'setup.ps1 targets Windows. See README for other platforms.' }
 if ($AnkiRoot -and -not $IncludeAnki) { throw '-AnkiRoot requires -IncludeAnki.' }
-if ($SkipDoclingModels -and -not $IncludeDocling) { throw '-SkipDoclingModels requires -IncludeDocling.' }
 
 Push-Location -LiteralPath $PSScriptRoot
 try {
@@ -34,11 +31,8 @@ try {
         Invoke-SetupCommand $npm.Source @('ci') 'Browser test dependency installation failed'
         Invoke-SetupCommand $node.Source @((Join-Path $PSScriptRoot 'node_modules\playwright\cli.js'), 'install', 'chromium') 'Chromium download failed'
     }
-    if ($IncludeDocling) {
-        & (Join-Path $PSScriptRoot 'tools\setup_docling.ps1') -Python $projectPython -SkipModels:$SkipDoclingModels
-    }
     if ($IncludeAnki) {
-        & (Join-Path $PSScriptRoot 'tools\setup_anki.ps1') -Python $projectPython -AnkiRoot $AnkiRoot
+        & (Join-Path $PSScriptRoot 'tools\setup\setup_anki.ps1') -Python $projectPython -AnkiRoot $AnkiRoot
     }
     Write-Host 'AnkiSense web setup completed. Start the local server with .\start.ps1'
     Write-Host 'Open http://127.0.0.1:8765 after the server starts. Existing local data and model settings are preserved.'

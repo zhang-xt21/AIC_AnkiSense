@@ -7,22 +7,26 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node tools/test_node.cjs",
-    "test:browser": "npm run test:browser:feedback && npm run test:browser:workbench && npm run test:browser:settings && npm run test:browser:automatic-import && npm run test:browser:integrated",
-    "test:browser:feedback": "node tools/feedback_check.cjs",
-    "test:browser:studio": "node tools/studio_check.cjs",
-    "test:browser:workbench": "node tools/workbench_check.cjs",
-    "test:browser:settings": "node tools/model_settings_check.cjs",
-    "test:browser:source-ai": "node tools/source_ai_proofread_check.cjs",
-    "test:browser:auto-learning": "node tools/auto_learning_check.cjs",
-    "test:browser:generation": "node tools/generation_check.cjs",
-    "test:browser:auto-illustration": "node tools/auto_illustration_check.cjs",
-    "test:browser:automatic-import": "node tools/automatic_import_check.cjs",
-    "test:browser:auto-cards": "node tools/auto_cards_check.cjs",
-    "test:browser:integrated": "node tools/integrated_desktop_check.cjs",
+    "test": "node tools/browser/test_node.cjs",
+    "test:browser": "npm run test:browser:feedback && npm run test:browser:workbench && npm run test:browser:figure-crop && npm run test:browser:card-filters && npm run test:browser:settings && npm run test:browser:automatic-import && npm run test:browser:integrated",
+    "test:browser:feedback": "node tools/browser/feedback_check.cjs",
+    "test:browser:studio": "node tools/browser/studio_check.cjs",
+    "test:browser:workbench": "node tools/browser/workbench_check.cjs",
+    "test:browser:figure-crop": "node tools/browser/figure_crop_check.cjs",
+    "test:browser:card-filters": "node tools/browser/card_filters_check.cjs",
+    "test:browser:settings": "node tools/browser/model_settings_check.cjs",
+    "test:browser:source-ai": "node tools/browser/source_ai_proofread_check.cjs",
+    "test:browser:auto-learning": "node tools/browser/auto_learning_check.cjs",
+    "test:browser:generation": "node tools/browser/generation_check.cjs",
+    "test:browser:auto-illustration": "node tools/browser/auto_illustration_check.cjs",
+    "test:browser:automatic-import": "node tools/browser/automatic_import_check.cjs",
+    "test:browser:auto-cards": "node tools/browser/auto_cards_check.cjs",
+    "test:browser:integrated": "node tools/browser/integrated_desktop_check.cjs",
     "test:desktop": "node --test desktop/health.test.cjs"
   },
   "devDependencies": {
+    "katex": "0.19.1",
     "playwright": "1.62.1"
-  }
+  },
+  "license": "AGPL-3.0-only"
 }

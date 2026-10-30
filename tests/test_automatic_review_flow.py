@@ -9,7 +9,7 @@ from ankisense.approval import valid_machine_approval
 from ankisense.llm import AIError, Settings
 from ankisense.schemas import CardDraft, DraftBatch
 from ankisense.sources import save_page_revision
-from test_card_auto_review import bind_imported_pdf, good_review
+from test_card_auto_review import bind_imported_pdf, good_review, correct_reference_diagnosis, minimal_answer_fixture
 from test_figure_recommendations import context, save
 from test_image_auto_review import saved
 
@@ -56,6 +56,8 @@ def flow(context, monkeypatch):
 
     monkeypatch.setattr(app.state.ai, "generate_drafts", generate)
     monkeypatch.setattr(app.state.ai, "review_card", review)
+    monkeypatch.setattr(app.state.ai, "diagnose_answer", correct_reference_diagnosis)
+    monkeypatch.setattr(app.state.ai, "minimal_answer_for_question", minimal_answer_fixture)
     try:
         yield client, page, gate, entered, calls
     finally:

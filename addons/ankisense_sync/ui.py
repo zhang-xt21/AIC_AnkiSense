@@ -14,14 +14,15 @@ from aqt.qt import (
 from aqt.utils import showWarning
 
 from .client import PluginError
-from .collection_sync import SyncError, apply_bundle
-from .transport import check_connection, prepare_bundle
+from .collection_sync import SyncError, apply_bundle, sync_inventory
+from .transport import check_connection, SyncSession
 from . import onboarding
 
 
 CLIENT_KEY = "ankisense_sync_client_id"
 PATH_KEY = "ankisense_sync_connection_file"
 DECK_KEY = "ankisense_sync_deck_id"
+DOCUMENT_KEY = "ankisense_sync_document_id"
 MENU_TEXT = "AnkiSense · 同步卡片…"
 
 
@@ -71,7 +72,7 @@ def _error_message(error, stage):
     if isinstance(error, OSError):
         return "无法读取或保存本机文件。请检查连接文件和当前 Anki 资料目录的访问权限。"
     if stage == "write":
-        return "同步写入未能完成。请检查 Anki 的资料和媒体目录，然后重新检查连接。"
+        return "写入 Anki 时遇到异常，部分卡片可能已经保存。请重新同步继续；若仍失败，请更新插件后重试。"
     return "操作未能完成，请检查本机 AnkiSense 服务和连接文件后重试。"
 
 
@@ -89,6 +90,9 @@ class SyncDialog(QDialog):
         self._empty_catalog = False
         self._active_path = ""
         self._target = None
+        self._session = None
+        self._totals = None
+        self._batch_skipped = 0
         self._hook_registered = False
 
         self.setWindowTitle("AnkiSense · 同步卡片")
@@ -113,6 +117,11 @@ class SyncDialog(QDialog):
         path_hint = QLabel("连接凭据只从文件读取，不在窗口中显示。", self)
         path_hint.setWordWrap(True)
         layout.addWidget(path_hint)
+
+        layout.addWidget(QLabel("同步讲义", self))
+        self.document_combo = QComboBox(self)
+        self.document_combo.addItem("全部讲义（检查连接后可选择）", None)
+        layout.addWidget(self.document_combo)
 
         layout.addWidget(QLabel("新增卡片的目标牌组", self))
         deck_row = QHBoxLayout()
@@ -179,7 +188,7 @@ class SyncDialog(QDialog):
 
     def _refresh_controls(self, *_args):
         available = not self._busy and not self._profile_closed
-        for widget in (self.path_edit, self.browse_button, self.deck_combo, self.new_deck_button):
+        for widget in (self.path_edit, self.browse_button, self.deck_combo, self.new_deck_button, self.document_combo):
             widget.setEnabled(available)
         has_path = bool(self.path_edit.text().strip())
         self.check_button.setEnabled(available and has_path)
@@ -188,6 +197,8 @@ class SyncDialog(QDialog):
 
     def _path_changed(self, *_args):
         if not self._busy:
+            self.document_combo.clear()
+            self.document_combo.addItem("全部讲义（检查连接后可选择）", None)
             self.status_label.setText("连接文件已更改，请重新检查连接。")
             self.details.clear()
         self._refresh_controls()
@@ -279,6 +290,13 @@ class SyncDialog(QDialog):
         if self._close_if_profile_changed():
             return
         warning = self._remember()
+        preferred = self.document_combo.currentData() or self.mw.pm.profile.get(DOCUMENT_KEY)
+        self.document_combo.clear()
+        self.document_combo.addItem("全部讲义", None)
+        for document in result.get("documents", []):
+            self.document_combo.addItem(document["title"], document["id"])
+            if document["id"] == preferred:
+                self.document_combo.setCurrentIndex(self.document_combo.count() - 1)
         self._set_busy(False, f"连接成功：{result['cards']} 张卡片可同步，{result['excluded']} 张暂不可同步。")
         lines = [f"本机服务：{result['base_url']}", f"接口版本：{result['protocol_version']}",
                  "同步会下载卡片文字和配图，不会触发 AI 答案分析。"]
@@ -295,18 +313,47 @@ class SyncDialog(QDialog):
         if not self._start("download", "正在下载并核对已批准卡片及配图…"):
             return
         self._target = target
+        self._session = None
+        self._totals = {"added": 0, "updated": 0, "unchanged": 0, "conflicts": [], "warnings": []}
+        document_id = self.document_combo.currentData()
+        self.mw.pm.profile[DOCUMENT_KEY] = document_id
         path, client_id = self._active_path, self._client_id
         try:
-            QueryOp(parent=self, op=lambda _col: prepare_bundle(path, client_id),
-                    success=self._prepared).without_collection().failure(self._failed).run_in_background()
+            QueryOp(parent=self, op=lambda _col: SyncSession(path, client_id, document_id),
+                    success=self._session_ready).without_collection().failure(self._failed).run_in_background()
         except Exception as error:
             self._failed(error)
+
+    def _session_ready(self, session):
+        if self._close_if_profile_changed():
+            return
+        self._session = session
+        self._next_batch()
+
+    def _next_batch(self):
+        if self._close_if_profile_changed():
+            return
+        session = self._session
+        self._stage = "download"
+        self.status_label.setText(f"正在分批同步：已处理 {session.position}/{session.total} 张…")
+        def read(col):
+            if self._profile_closed or col is not self._collection:
+                raise _ProfileChanged()
+            return sync_inventory(col, session.upcoming(), session.server_id,
+                                  self._profile_path / "ankisense-sync-state.json")
+        def download(inventory):
+            if self._close_if_profile_changed():
+                return
+            QueryOp(parent=self, op=lambda _col: session.next_bundle(inventory),
+                    success=self._prepared).without_collection().failure(self._failed).run_in_background()
+        QueryOp(parent=self, op=read, success=download).failure(self._failed).run_in_background()
 
     def _prepared(self, bundle):
         if self._close_if_profile_changed():
             return
         self._excluded = len(bundle.get("excluded", []))
-        self._empty_catalog = not bundle.get("cards")
+        self._batch_skipped = bundle.get("skipped_unchanged", 0)
+        self._empty_catalog = not bundle.get("catalog_ids", bundle.get("cards"))
         if self._empty_catalog and isinstance(self._target, str):
             self._set_busy(False, "当前没有可同步的已批准卡片。")
             self.details.setPlainText(
@@ -343,12 +390,27 @@ class SyncDialog(QDialog):
         if self._close_if_profile_changed():
             return
         result = outcome["result"]
+        if self._session is not None:
+            for key in ("added", "updated", "unchanged"):
+                self._totals[key] += result[key]
+            self._totals["unchanged"] += self._batch_skipped
+            for key in ("conflicts", "warnings"):
+                self._totals[key] = list(dict.fromkeys([*self._totals[key], *result.get(key, [])]))
+            if self._session.has_more and not result.get("stopped"):
+                self._next_batch()
+                return
+            if result.get("stopped"):
+                self._totals["warnings"].append("本次仅完成部分内容，请修复问题后重新同步；已成功的卡片会自动跳过。")
+                self._totals["stopped"] = True
+            result = self._totals
+            self._session = None
         conflicts = result.get("conflicts", [])
         warnings = list(result.get("warnings", []))
         preference_warning = self._remember(outcome["deck_id"])
         if preference_warning:
             warnings.append(preference_warning)
-        self._set_busy(False, f"同步完成：新增 {result['added']} · 更新 {result['updated']} · "
+        label = "同步部分完成" if result.get("stopped") else "同步完成"
+        self._set_busy(False, f"{label}：新增 {result['added']} · 更新 {result['updated']} · "
                              f"未变化 {result['unchanged']} · 冲突 {len(conflicts)}")
         lines = []
         if self._empty_catalog:
@@ -384,6 +446,11 @@ class SyncDialog(QDialog):
         if self._close_if_profile_changed():
             return
         message = _error_message(error, self._stage)
+        if self._session is not None and self._totals is not None:
+            counts = self._totals
+            message += (f"\n已保留：新增 {counts['added']} · 更新 {counts['updated']} · 未变化 {counts['unchanged']}。"
+                        "\n可重新同步，已完成且未变化的卡片和配图将跳过。")
+        self._session = None
         self._set_busy(False, "本次操作未完成。")
         self.details.setPlainText(message)
 

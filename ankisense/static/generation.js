@@ -42,11 +42,11 @@
     const start = button("开始制卡 →", startJob, "btn generation-start"); start.disabled = true;
     const autoImages = node("input"); autoImages.type = "checkbox";
     autoImages.checked = preferences.autoImages !== false;
-    autoImages.setAttribute("aria-label", "自动匹配讲义图片");
+    autoImages.setAttribute("aria-label", "准备引用页原图");
     const imageOption = node("div", "generation-image-option");
     const imageLabel = node("label", "generation-scope-toggle");
-    imageLabel.append(autoImages, node("span", "", "自动匹配讲义图片"));
-    imageOption.append(imageLabel, node("p", "helper", "需要配图时，从引用页寻找原图。匹配在本机完成；检查会将候选图、原页及相关卡片内容发送至当前模型，会消耗 API 额度。"));
+    imageLabel.append(autoImages, node("span", "", "准备引用页原图"));
+    imageOption.append(imageLabel, node("p", "helper", "在本机准备引用页，之后可按需裁剪加入卡片。"));
     autoImages.addEventListener("change", () => { preferences.autoImages = autoImages.checked; preferences.requestId = null; });
     const progress = node("section", "generation-job"); progress.hidden = true;
     progress.setAttribute("aria-label", "本次制卡进度");
